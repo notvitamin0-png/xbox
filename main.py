@@ -718,7 +718,7 @@ async def send_error_message(task, error):
 async def send_rejection_message(original_name, valid_count, invalid_count, invalid_examples):
     msg = f" **FILE REJECTED**\n\n `{original_name}`\n Valid Microsoft accounts: `{valid_count}`\n Skipped: `{invalid_count}` non-Microsoft account(s)"
     if invalid_examples:
-        msg += f"\n\n**Examples rejected:**\n" + "\n".join([f"• {e}" for e in invalid_examples[:3]])
+        msg += f"\n\n**Examples rejected:**\n" + "\n".join([f"Â• {e}" for e in invalid_examples[:3]])
     msg += f"\n\n Allowed domains:\nhotmail.com, outlook.com, live.com, msn.com"
     await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
 
